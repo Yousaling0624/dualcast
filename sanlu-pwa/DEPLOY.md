@@ -1,33 +1,31 @@
 # 三叠播 PWA 部署指南
 
-> 现在主站由 GitHub Actions 自动部署到 **https://yousaling0624.github.io/dualcast/**（见仓库根目录 `.github/workflows/deploy-pages.yml`）。
-> 本文档保留 Cloudflare Pages 的部署方式：它同时也是默认 API/直播流中转。
+> 两个主站都已上线：
+> - GitHub Actions → **https://yousaling0624.github.io/dualcast/**
+> - Cloudflare Pages → **https://sanlu.yousaling.dpdns.org**（备用：`https://sanlu.pages.dev`）
+>
+> Cloudflare 版本同时提供同源的 `/api/*` 与 `/stream/*` 中转。
 
-Cloudflare 目标地址：`https://sanlu.yousaling.dpdns.org`（备用：`https://sanlu.pages.dev`）
-
-## 方式一：给我 Token，我帮你全自动部署（推荐）
-
-1. 打开 https://dash.cloudflare.com/profile/api-tokens → **创建令牌** → 底部 **创建自定义令牌**
-2. 权限按下表勾选（共 4 条）：
-
-   | 范围 | 资源 | 权限 |
-   |---|---|---|
-   | 帐户 | Cloudflare Pages | 编辑 |
-   | 帐户 | 帐户设置 | 读取 |
-   | 区域 | 区域 | 读取 |
-   | 区域 | DNS | 编辑 |
-
-3. 把 Token 发给我（形如 `xK9...` 一长串），我执行 `deploy.sh` 完成构建、建项目、部署、绑域名、配 DNS 全流程。
-
-## 方式二：自己部署（3 条命令）
+## 方式一：Wrangler 登录后一键部署（推荐）
 
 ```bash
 cd sanlu-pwa
+npx wrangler login     # 首次：按提示在浏览器完成 OAuth 授权
+npm run deploy         # 构建 + 发布到 Pages 项目 sanlu
+```
+
+CI 环境不能交互登录时，改为设置 `CLOUDFLARE_API_TOKEN`。
+
+## 方式二：自定义域 / DNS 首次配置
+
+项目 `sanlu` 与自定义域 `sanlu.yousaling.dpdns.org` 已绑定，日常只需方式一。首次在新账号创建时可执行：
+
+```bash
 export CLOUDFLARE_API_TOKEN=你的Token
 bash deploy.sh
 ```
 
-脚本会自动完成全部步骤；也可以手动逐步执行：
+脚本会完成构建、建项目、部署、绑域名、配 DNS；也可手动逐步执行：
 
 ```bash
 npx vite build                              # 构建

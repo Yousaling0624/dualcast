@@ -4,7 +4,7 @@
 
 | 子项目 | 说明 | 地址 |
 |---|---|---|
-| [`sanlu-pwa/`](./sanlu-pwa/README.md) | **网页版 PWA**（PC / iOS / Android / 鸿蒙浏览器） | https://yousaling0624.github.io/dualcast/ |
+| [`sanlu-pwa/`](./sanlu-pwa/README.md) | **网页版 PWA**（PC / iOS / Android / 鸿蒙浏览器） | [GitHub Pages](https://yousaling0624.github.io/dualcast/) · [Cloudflare](https://sanlu.yousaling.dpdns.org) |
 | [`DualLive/`](./DualLive/README.md) | **Android 原生版**（Jetpack Compose，ExoPlayer） | 本地构建 APK |
 
 ## 网页版功能
@@ -19,7 +19,7 @@
 - 我的组合、最近看过、房间预览（封面 / 主播 / 人气 / 分区 / 开播状态）
 - 可安装 PWA，离线打开应用外壳
 
-## 部署（GitHub Pages）
+## 部署（GitHub Pages + Cloudflare Pages）
 
 推送到 `main` 后，[`.github/workflows/deploy-pages.yml`](./.github/workflows/deploy-pages.yml) 会自动构建 `sanlu-pwa/` 并发布到 GitHub Pages。首次使用时在仓库 **Settings → Pages → Build and deployment** 选择 **GitHub Actions** 即可。
 
@@ -36,6 +36,16 @@ npm ci
 npm run typecheck
 VITE_BASE=/dualcast/ npm run build   # 输出 dist/
 ```
+
+Cloudflare Pages 版本使用根路径构建，并自带同源 `/api`、`/stream` 转发：
+
+```bash
+cd sanlu-pwa
+npx wrangler login      # 首次：浏览器 OAuth 授权
+npm run deploy          # 构建并发布到 Pages 项目 sanlu
+```
+
+线上地址：https://sanlu.yousaling.dpdns.org （备用 https://sanlu.pages.dev ）。
 
 Android 版：`cd DualLive && ./gradlew assembleDebug`（产出 `app/build/outputs/apk/debug/`）。
 

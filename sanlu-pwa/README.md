@@ -104,15 +104,18 @@ npm run preview
 
 如需自定义中转，在 **Settings → Secrets and variables → Actions → Variables** 添加 `VITE_RELAY_URL`。
 
-### Cloudflare Pages（备用）
+### Cloudflare Pages
+
+线上地址：https://sanlu.yousaling.dpdns.org （备用 https://sanlu.pages.dev ）
 
 ```bash
-npm run build
-export CLOUDFLARE_API_TOKEN=xxx
-bash deploy.sh
+npx wrangler login      # 首次：浏览器 OAuth 授权
+npm run deploy          # 构建并发布到 Pages 项目 sanlu
 ```
 
-`functions/` 会随 Pages 一起部署，提供 `/api/*` 与 `/stream/*`。
+CI 环境可用 `CLOUDFLARE_API_TOKEN` 代替 `wrangler login`。
+
+`functions/` 会随 Pages 一起部署，提供 `/api/*` 与 `/stream/*`；通过自定义域访问时中转与页面同源（pages.dev 会调用自定义域中转）。
 
 ## 已知限制
 
