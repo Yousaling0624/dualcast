@@ -1289,6 +1289,20 @@ onBeforeUnmount(() => {
   background: #000;
 }
 
+/* 全屏时底栏铺满整行，按钮均匀分布，避免右侧挤成一团、左边一大片空 */
+.video-zone:fullscreen .bottombar {
+  left: calc(clamp(8px, 1vw, 14px) + var(--safe-left));
+  right: calc(clamp(8px, 1vw, 14px) + var(--safe-right));
+  width: auto;
+  max-width: none;
+  transform: none;
+}
+
+/* 全屏底栏更高，提示条跟着抬高，别压到按钮上 */
+.video-zone:fullscreen .err-banner {
+  bottom: calc(76px + var(--safe-bottom));
+}
+
 .video-b {
   position: absolute;
   inset: 0;
@@ -1569,7 +1583,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.36);
   backdrop-filter: blur(22px) saturate(1.15);
   z-index: 5;
-  justify-content: flex-start;
+  justify-content: space-between;
 }
 
 .dock-play {
@@ -1637,7 +1651,6 @@ onBeforeUnmount(() => {
 .bottombar .dock-fs {
   flex: 0 0 auto;
   width: 40px;
-  margin-left: auto;
   color: #fff8ef;
   background: rgba(217, 119, 87, 0.22);
 }
@@ -2439,7 +2452,6 @@ onBeforeUnmount(() => {
     width: 42px;
     max-width: none;
     height: 38px;
-    margin-left: auto;
   }
 
   .dock-sep {

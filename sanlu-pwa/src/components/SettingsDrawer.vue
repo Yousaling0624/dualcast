@@ -1032,7 +1032,7 @@ defineOptions({ name: 'SettingsDrawer' })
                 <div class="about-logo">叠</div>
                 <div>
                   <h3>叠播 DualCast</h3>
-                  <p>v1.7.2 · PWA 网页版</p>
+                  <p>v1.7.3 · PWA 网页版</p>
                 </div>
               </div>
               <p class="dim">
