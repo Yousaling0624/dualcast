@@ -575,25 +575,25 @@ defineExpose({ focus: () => focusInput.value?.focus() })
 .src-badge {
   display: inline-grid;
   place-items: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 5px;
+  min-width: 18px;
+  height: 15px;
+  padding: 0 6px;
+  border-radius: 999px;
   color: #fff;
   font-size: 9.5px;
   font-weight: 750;
   line-height: 1;
-  vertical-align: 1px;
+  vertical-align: -2px;
   margin-right: 4px;
   text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
 }
 
 .src-badge.dot {
-  min-width: 8px;
-  width: 8px;
-  height: 14px;
+  min-width: 0;
+  width: 12px;
+  height: 12px;
   padding: 0;
-  border-radius: 999px;
+  border-radius: 50%;
 }
 
 .list {

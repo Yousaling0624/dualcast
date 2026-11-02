@@ -869,11 +869,27 @@ async function openSettings(
 
 const multiOpen = ref(false)
 const multiInput = ref('')
+const multiPopEl = ref<HTMLElement | null>(null)
+/** 面板内容超出高度时给底部加渐隐，提示还能往下滑 */
+const multiFade = ref(false)
+
+function updateMultiFade() {
+  const el = multiPopEl.value
+  multiFade.value = !!el && el.scrollHeight - el.scrollTop - el.clientHeight > 8
+}
 
 function toggleMultiPanel() {
   multiOpen.value = !multiOpen.value
-  if (multiOpen.value) reveal()
+  if (multiOpen.value) {
+    reveal()
+    nextTick(updateMultiFade)
+  }
 }
+
+watch(
+  () => [store.sources.length, multiOpen.value],
+  () => nextTick(updateMultiFade)
+)
 
 async function quickAddSource() {
   if (store.sourceBusy || !multiInput.value.trim()) return
@@ -1098,7 +1114,15 @@ onBeforeUnmount(() => {
 
       <!-- 多路直播间快捷面板 -->
       <Transition name="fade">
-        <div v-if="controls && multiOpen" class="multi-pop" @pointerdown.stop @click.stop>
+        <div
+          v-if="controls && multiOpen"
+          ref="multiPopEl"
+          class="multi-pop"
+          :class="{ 'scroll-fade': multiFade }"
+          @pointerdown.stop
+          @click.stop
+          @scroll.passive="updateMultiFade"
+        >
           <div class="mp-head">
             <span class="mp-title"><AppIcon name="pip" :size="14" />多路直播间</span>
             <b v-if="store.sources.length">{{ store.sources.length }} 路</b>
@@ -1470,7 +1494,7 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 错误提示 -->
-      <div v-if="firstError && !quickTarget" class="err-banner" @pointerdown.stop>
+      <div v-if="firstError && !quickTarget && !multiOpen" class="err-banner" @pointerdown.stop>
         <AppIcon name="warning" :size="16" />
         <span>{{ firstError }}</span>
         <button v-if="store.danmakuStatus === 'failed'" @click="retryDanmaku">重试弹幕</button>
@@ -1929,7 +1953,7 @@ onBeforeUnmount(() => {
   right: calc(10px + var(--safe-right));
   bottom: calc(66px + var(--safe-bottom));
   width: min(390px, calc(100% - 20px));
-  max-height: min(58%, calc(100% - 92px));
+  max-height: min(64%, calc(100% - 76px));
   overflow-y: auto;
   overscroll-behavior: contain;
   z-index: 7;
@@ -1943,6 +1967,12 @@ onBeforeUnmount(() => {
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
   backdrop-filter: blur(20px);
   color: #fff8ef;
+}
+
+/* 还有内容在下面时，底部渐隐提示可以继续滑 */
+.multi-pop.scroll-fade {
+  mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent);
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 22px), transparent);
 }
 
 .mp-head {
@@ -2032,10 +2062,10 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   min-width: 16px;
   height: 16px;
-  padding: 0 4px;
+  padding: 0 5px;
   display: inline-grid;
   place-items: center;
-  border-radius: 5px;
+  border-radius: 999px;
   color: #fff;
   font-size: 9px;
   font-weight: 750;

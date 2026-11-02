@@ -4,7 +4,7 @@
  * - /api 与 /stream 请求一律直连，绝不缓存；
  * - 所有路径相对 SW 作用域解析，兼容 GitHub Pages 的 /<repo>/ 子路径。
  */
-const CACHE = 'sanlu-shell-v13'
+const CACHE = 'sanlu-shell-v14'
 const SCOPE = new URL(self.registration.scope)
 const SCOPE_PATH = SCOPE.pathname
 const SHELL = [

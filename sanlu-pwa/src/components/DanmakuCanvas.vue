@@ -42,17 +42,25 @@ let ro: ResizeObserver | null = null
 let lastTick = 0
 let lastWidth = 0
 let frozenSeq = 0
+/** 正文字心到基线的距离，layout 时按实际字体量一次，气泡靠它对齐 */
+let inkOffset = 18 * 0.35
 
 function fontCss(scale: number, bold: boolean) {
   return `${bold ? '600 ' : ''}${Math.round(18 * scale)}px 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', sans-serif`
 }
 
 function badgeFontPx(scale: number) {
-  return Math.max(9, Math.round(11 * scale))
+  // 气泡里的字比弹幕正文小一号，跟着字号缩放
+  return Math.max(8, Math.round(10 * scale))
 }
 
 function badgeFontCss(scale: number) {
   return `700 ${badgeFontPx(scale)}px 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', sans-serif`
+}
+
+/** 气泡高度：和正文的视觉高度对齐，做成细长椭圆 */
+function badgeBarH(scale: number): number {
+  return Math.max(12, Math.round(18 * scale * 0.86))
 }
 
 function colorOf(m: ChatMsg): string {
@@ -71,11 +79,21 @@ function showSourceBadges(): boolean {
   return shouldShowSourceBadges()
 }
 
+/** 用实际字体的字形包围盒算字心，比按 em 估算更准，换字体也不跑偏 */
+function measureInkOffset(c: CanvasRenderingContext2D, scale: number, bold: boolean): number {
+  c.font = fontCss(scale, bold)
+  const m = c.measureText('国')
+  const asc = m.actualBoundingBoxAscent
+  const desc = m.actualBoundingBoxDescent
+  if (!Number.isFinite(asc) || !Number.isFinite(desc) || asc <= 0) return 18 * scale * 0.35
+  return (asc - desc) / 2
+}
+
 function badgeWidth(c: CanvasRenderingContext2D, text: string, scale: number): number {
   const fs = badgeFontPx(scale)
   c.font = badgeFontCss(scale)
-  if (!text) return Math.round(fs * 0.62)
-  return Math.round(c.measureText(text).width + fs * 0.72)
+  if (!text) return Math.round(badgeBarH(scale) * 0.62)
+  return Math.round(c.measureText(text).width + fs * 1.1)
 }
 
 function layout() {
@@ -91,6 +109,7 @@ function layout() {
 
   const d = store.settings.danmaku
   laneH = 20 * d.fontScale * 1.35
+  if (ctx) inkOffset = measureInkOffset(ctx, d.fontScale, d.bold)
   const widthChanged = lastWidth > 0 && Math.abs(rect.width - lastWidth) > 1
   const ratio = widthChanged ? rect.width / lastWidth : 1
   lastWidth = rect.width
@@ -221,23 +240,33 @@ function spawn() {
 }
 
 function drawBadge(c: CanvasRenderingContext2D, it: Item, alpha: number) {
-  const bubbleH = Math.max(12, Math.round(laneH - 8))
-  const y = it.top + (laneH - bubbleH) / 2
+  const scale = store.settings.danmaku.fontScale
+  const barH = badgeBarH(scale)
+  // 和正文的字心对齐：正文基线在 top + laneH * 0.78
+  const centerY = it.top + laneH * 0.78 - inkOffset
   const x = it.x
-  const w = Math.max(it.badgeW, 8)
+  // 只有颜色没有字时缩成一个小圆点，有字时是细长椭圆
+  const w = it.badge ? Math.max(it.badgeW, barH) : Math.round(barH * 0.62)
+  const h = it.badge ? barH : w
   c.globalAlpha = Math.min(1, alpha + 0.06)
   c.fillStyle = it.badgeColor || '#d97757'
-  roundRect(c, x, y, w, bubbleH, Math.min(5, bubbleH / 2))
+  roundRect(c, x, centerY - h / 2, w, h, h / 2)
   c.fill()
   if (it.badge) {
     c.globalAlpha = alpha
     c.fillStyle = '#ffffff'
-    c.font = `700 ${it.badgeFont}px 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', sans-serif`
+    c.font = badgeFontCss(scale)
+    // 气泡文字也按字形包围盒居中，别用 middle 留出字体的上下不对称空隙
+    const m = c.measureText(it.badge)
+    const asc = m.actualBoundingBoxAscent
+    const desc = m.actualBoundingBoxDescent
+    const ty = Number.isFinite(asc) && asc > 0 ? centerY + (asc - desc) / 2 : centerY
     c.textAlign = 'center'
-    c.textBaseline = 'middle'
-    c.fillText(it.badge, x + w / 2, y + bubbleH / 2 + 0.5)
-    c.textAlign = 'left'
     c.textBaseline = 'alphabetic'
+    c.fillText(it.badge, x + w / 2, ty)
+    c.textAlign = 'left'
+    // 画完气泡把字体恢复成正文字体，否则后面的弹幕文字会沿用气泡的小字号
+    c.font = fontCss(scale, store.settings.danmaku.bold)
   }
 }
 

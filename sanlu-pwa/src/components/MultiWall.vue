@@ -137,7 +137,7 @@ onBeforeUnmount(() => {
 .multi-wall {
   position: absolute;
   left: 10px;
-  bottom: 70px;
+  bottom: calc(70px + var(--safe-bottom, 0px));
   z-index: 5;
   width: min(40%, 380px);
   max-height: calc(100% - 120px);
@@ -316,8 +316,8 @@ onBeforeUnmount(() => {
   place-items: center;
   min-width: 14px;
   height: 14px;
-  padding: 0 3px;
-  border-radius: 4px;
+  padding: 0 4px;
+  border-radius: 999px;
   color: #fff;
   font-size: 8.5px;
   font-weight: 750;
@@ -364,7 +364,7 @@ onBeforeUnmount(() => {
   .multi-wall {
     width: min(48%, 230px);
     max-height: calc(100% - 108px);
-    bottom: 62px;
+    bottom: calc(62px + var(--safe-bottom, 0px));
   }
 
   .wall-grid {

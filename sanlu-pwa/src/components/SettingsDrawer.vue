@@ -370,7 +370,7 @@ defineOptions({ name: 'SettingsDrawer' })
                   </div>
                   <AppIcon name="sparkles" :size="19" class="group-icon accent" />
                 </div>
-                <div class="row">
+                <div class="row theme-row">
                   <span class="row-text">
                     <strong>主题</strong>
                     <small>页面、设置面板和输入框统一换色</small>
@@ -1071,7 +1071,7 @@ defineOptions({ name: 'SettingsDrawer' })
                 <div class="about-logo">叠</div>
                 <div>
                   <h3>叠播 DualCast</h3>
-                  <p>v1.8.0 · PWA 网页版</p>
+                  <p>v1.8.1 · PWA 网页版</p>
                 </div>
               </div>
               <p class="dim">
@@ -1537,14 +1537,14 @@ input[type='range'] {
 }
 
 .source-badge {
-  min-width: 26px;
-  height: 26px;
-  padding: 0 6px;
-  border-radius: 9px;
+  min-width: 24px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
   display: inline-grid;
   place-items: center;
   color: #fff;
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   line-height: 1;
   flex: 0 0 auto;
@@ -2213,16 +2213,33 @@ input[type='range'] {
 }
 
 @media (max-width: 560px) {
+  /* 7 个分类排成 4 + 3，第二行和第一行同一列对齐，不会右半边散开 */
   .tabs {
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: 6px;
     overflow: visible;
   }
 
   .tab {
-    flex: 1 1 calc(33.333% - 8px);
     justify-content: center;
-    padding: 8px 6px;
+    padding: 8px 4px;
+    font-size: 11.5px;
+    gap: 4px;
+  }
+
+  /* 主题三个选项在窄屏上整行等宽排列，不会被挤成 2 + 1 */
+  .theme-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+  }
+
+  .theme-row .theme-segs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
