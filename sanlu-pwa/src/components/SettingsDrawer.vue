@@ -28,11 +28,12 @@ import {
 } from '../lib/net'
 import AppIcon from './AppIcon.vue'
 
-type Tab = 'account' | 'danmaku' | 'mix' | 'video' | 'relay' | 'about'
+type Tab = 'account' | 'danmaku' | 'multi' | 'mix' | 'video' | 'relay' | 'about'
 
 const TABS = [
   { key: 'account', label: '账号', icon: 'user' },
   { key: 'danmaku', label: '弹幕', icon: 'danmaku' },
+  { key: 'multi', label: '多路', icon: 'pip' },
   { key: 'mix', label: '混音', icon: 'tune' },
   { key: 'video', label: '画面', icon: 'quality' },
   { key: 'relay', label: '中转', icon: 'link' },
@@ -361,6 +362,42 @@ defineOptions({ name: 'SettingsDrawer' })
           <div class="pane scroll-y">
             <!-- 账号 -->
             <section v-if="tab === 'account'" class="pane-inner">
+              <div class="group">
+                <div class="group-head">
+                  <div>
+                    <h3>外观</h3>
+                    <p>深色模式会跟着系统自动切换，也可以在这里固定。</p>
+                  </div>
+                  <AppIcon name="sparkles" :size="19" class="group-icon accent" />
+                </div>
+                <div class="row">
+                  <span class="row-text">
+                    <strong>主题</strong>
+                    <small>页面、设置面板和输入框统一换色</small>
+                  </span>
+                  <div class="segs theme-segs">
+                    <button
+                      :class="{ on: store.settings.theme === 'auto' }"
+                      @click="store.settings.theme = 'auto'"
+                    >
+                      跟随系统
+                    </button>
+                    <button
+                      :class="{ on: store.settings.theme === 'light' }"
+                      @click="store.settings.theme = 'light'"
+                    >
+                      浅色
+                    </button>
+                    <button
+                      :class="{ on: store.settings.theme === 'dark' }"
+                      @click="store.settings.theme = 'dark'"
+                    >
+                      深色
+                    </button>
+                  </div>
+                </div>
+              </div>
+
               <template v-if="store.loggedIn">
                 <div class="account-card">
                   <img
@@ -564,6 +601,63 @@ defineOptions({ name: 'SettingsDrawer' })
               <div class="group">
                 <div class="group-head">
                   <div>
+                    <h3>SC 悬浮窗</h3>
+                    <p>和浏览器脚本一样，在画面左上角浮出醒目留言；全屏也会显示。</p>
+                  </div>
+                  <AppIcon name="sc" :size="19" class="group-icon accent" />
+                </div>
+
+                <label class="row">
+                  <span class="row-text"><strong>显示 SC</strong><small>画面左上角的悬浮卡片</small></span>
+                  <span class="switch">
+                    <input v-model="store.settings.sc.enabled" type="checkbox" />
+                    <span class="track"></span><span class="thumb"></span>
+                  </span>
+                </label>
+                <label class="row">
+                  <span class="row-text"><strong>显示金额</strong><small>在卡片上显示 SC 价格</small></span>
+                  <span class="switch">
+                    <input v-model="store.settings.sc.showPrice" type="checkbox" />
+                    <span class="track"></span><span class="thumb"></span>
+                  </span>
+                </label>
+
+                <div class="row col">
+                  <div class="range-label">
+                    <span class="row-text"><strong>停留时长</strong><small>服务端时长更长时以服务端为准</small></span>
+                    <em>{{ store.settings.sc.duration }}s</em>
+                  </div>
+                  <input
+                    v-model.number="store.settings.sc.duration"
+                    type="range"
+                    min="4"
+                    max="30"
+                    step="1"
+                    :style="{ '--fill': ((store.settings.sc.duration - 4) / 26) * 100 + '%' }"
+                  />
+                </div>
+
+                <div class="row col">
+                  <span class="row-text"><strong>同时显示</strong></span>
+                  <div class="segs">
+                    <button
+                      v-for="n in 5"
+                      :key="n"
+                      :class="{ on: store.settings.sc.max === n }"
+                      @click="store.settings.sc.max = n"
+                    >
+                      {{ n }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- 混音 -->
+            <section v-else-if="tab === 'multi'" class="pane-inner">
+              <div class="group">
+                <div class="group-head">
+                  <div>
                     <h3>多路弹幕 / 声音 / 画面</h3>
                     <p>
                       导入其他直播间后，弹幕会带上彩色气泡。可以单独开声音，也可以把画面放进
@@ -696,63 +790,8 @@ defineOptions({ name: 'SettingsDrawer' })
                   还没有导入其他直播间。导入后可以同时看多个直播间的弹幕。
                 </p>
               </div>
-
-              <div class="group">
-                <div class="group-head">
-                  <div>
-                    <h3>SC 悬浮窗</h3>
-                    <p>和浏览器脚本一样，在画面左上角浮出醒目留言；全屏也会显示。</p>
-                  </div>
-                  <AppIcon name="sc" :size="19" class="group-icon accent" />
-                </div>
-
-                <label class="row">
-                  <span class="row-text"><strong>显示 SC</strong><small>画面左上角的悬浮卡片</small></span>
-                  <span class="switch">
-                    <input v-model="store.settings.sc.enabled" type="checkbox" />
-                    <span class="track"></span><span class="thumb"></span>
-                  </span>
-                </label>
-                <label class="row">
-                  <span class="row-text"><strong>显示金额</strong><small>在卡片上显示 SC 价格</small></span>
-                  <span class="switch">
-                    <input v-model="store.settings.sc.showPrice" type="checkbox" />
-                    <span class="track"></span><span class="thumb"></span>
-                  </span>
-                </label>
-
-                <div class="row col">
-                  <div class="range-label">
-                    <span class="row-text"><strong>停留时长</strong><small>服务端时长更长时以服务端为准</small></span>
-                    <em>{{ store.settings.sc.duration }}s</em>
-                  </div>
-                  <input
-                    v-model.number="store.settings.sc.duration"
-                    type="range"
-                    min="4"
-                    max="30"
-                    step="1"
-                    :style="{ '--fill': ((store.settings.sc.duration - 4) / 26) * 100 + '%' }"
-                  />
-                </div>
-
-                <div class="row col">
-                  <span class="row-text"><strong>同时显示</strong></span>
-                  <div class="segs">
-                    <button
-                      v-for="n in 5"
-                      :key="n"
-                      :class="{ on: store.settings.sc.max === n }"
-                      @click="store.settings.sc.max = n"
-                    >
-                      {{ n }}
-                    </button>
-                  </div>
-                </div>
-              </div>
             </section>
 
-            <!-- 混音 -->
             <section v-else-if="tab === 'mix'" class="pane-inner">
               <div class="group">
                 <div class="group-head">
@@ -1032,7 +1071,7 @@ defineOptions({ name: 'SettingsDrawer' })
                 <div class="about-logo">叠</div>
                 <div>
                   <h3>叠播 DualCast</h3>
-                  <p>v1.7.5 · PWA 网页版</p>
+                  <p>v1.8.0 · PWA 网页版</p>
                 </div>
               </div>
               <p class="dim">
@@ -1095,7 +1134,7 @@ defineOptions({ name: 'SettingsDrawer' })
   flex-direction: column;
   animation: sheetUp 0.3s cubic-bezier(0.2, 0.85, 0.25, 1);
   padding-bottom: var(--safe-bottom);
-  border: 1px solid rgba(255, 255, 255, 0.6);
+  border: 1px solid var(--glass-border);
   border-bottom: none;
   box-shadow: 0 -24px 80px rgba(28, 23, 18, 0.28);
   overflow: hidden;
@@ -1286,7 +1325,7 @@ defineOptions({ name: 'SettingsDrawer' })
   gap: 14px;
   min-height: 48px;
   padding: 7px 2px;
-  border-bottom: 1px solid rgba(32, 29, 25, 0.055);
+  border-bottom: 1px solid var(--line);
   font-size: 13.5px;
 }
 
@@ -1347,6 +1386,17 @@ defineOptions({ name: 'SettingsDrawer' })
 .segs.wide {
   justify-content: center;
   padding-top: 4px;
+}
+
+/* 外观：三个选项在手机上也不挤 */
+.theme-segs {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.theme-segs button {
+  padding: 6px 10px;
+  font-size: 11.5px;
 }
 
 .segs button {
@@ -1725,7 +1775,7 @@ input[type='range'] {
 .qr-overlay {
   position: absolute;
   inset: 12px;
-  background: rgba(255, 253, 249, 0.92);
+  background: var(--glass-strong);
   border-radius: 14px;
   justify-content: center;
   backdrop-filter: blur(4px);
@@ -1786,12 +1836,12 @@ input[type='range'] {
 
 .channel-card.a {
   border-color: rgba(217, 119, 87, 0.22);
-  background: linear-gradient(135deg, rgba(255, 253, 249, 0.9), rgba(255, 243, 235, 0.72));
+  background: linear-gradient(135deg, var(--glass-strong), var(--accent-soft));
 }
 
 .channel-card.b {
   border-color: rgba(102, 121, 207, 0.2);
-  background: linear-gradient(135deg, rgba(255, 253, 249, 0.9), rgba(240, 242, 252, 0.72));
+  background: linear-gradient(135deg, var(--glass-strong), var(--accent-2-soft));
 }
 
 .channel-head {
@@ -2145,7 +2195,7 @@ input[type='range'] {
 
   .sheet {
     border-radius: 30px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.6);
+    border-bottom: 1px solid var(--glass-border);
     max-height: 86dvh;
   }
 

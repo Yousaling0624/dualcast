@@ -122,7 +122,11 @@ export interface ExtraRoom {
   blocked: boolean
 }
 
+export type ThemeMode = 'auto' | 'light' | 'dark'
+
 export interface Settings {
+  /** 界面配色：跟随系统 / 浅色 / 深色 */
+  theme: ThemeMode
   danmaku: {
     enabled: boolean
     /** 把 B 路（比赛画面）直播间的弹幕也合并到同一屏 */
@@ -174,6 +178,7 @@ const NAME_LIMIT = 12
 const QUOTE_RESERVE = 3
 
 const DEFAULT_SETTINGS: Settings = {
+  theme: 'auto',
   danmaku: {
     enabled: true,
     includeB: false,
@@ -234,6 +239,7 @@ function loadSettings(): Settings {
   const raw: any = readJson('dc_settings', null)
   const s: Settings = structuredClone(DEFAULT_SETTINGS)
   if (!raw || typeof raw !== 'object') return s
+  if (raw.theme === 'light' || raw.theme === 'dark') s.theme = raw.theme
   if (raw.danmaku && typeof raw.danmaku === 'object') {
     Object.assign(s.danmaku, raw.danmaku)
     // 旧版本用 outline 布尔值控制描边

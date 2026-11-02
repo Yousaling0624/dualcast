@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
+  addSource,
   attachStreams,
   bindVideos,
   buildReply,
@@ -10,6 +11,7 @@ import {
   exitSession,
   plusOne,
   reconnect,
+  removeSource,
   reportMessage,
   replyInputLimit,
   resumePlayback,
@@ -21,10 +23,13 @@ import {
   swap,
   togglePlay,
   toggleSc,
+  updateSource,
   viewerLabel,
 } from '../lib/store'
 import type { ChatMsg } from '../lib/danmaku'
 import type { ReportResult } from '../lib/bili'
+import type { ExtraRoom } from '../lib/store'
+import { badgePreviewText } from '../lib/sources'
 import {
   cropThroughView,
   cropTransform,
@@ -207,7 +212,8 @@ function reveal() {
   exitMiniImmersive()
   if (hideTimer) clearTimeout(hideTimer)
   hideTimer = window.setTimeout(() => {
-    if (quickTarget.value) return
+    // 快捷回复 / 多路面板还开着时不自动收，避免打字打一半控件消失
+    if (quickTarget.value || multiOpen.value) return
     hideControls()
   }, 4600)
 }
@@ -215,6 +221,7 @@ function reveal() {
 function hideControls() {
   controls.value = false
   qualityOpen.value = false
+  multiOpen.value = false
   // 主画面控件和小窗按钮统一成一套沉浸状态：收就一起收
   if (miniOn.value && !miniExpanded.value) miniImmersive.value = true
   if (hideTimer) {
@@ -848,12 +855,57 @@ async function doQuickSend() {
   if (ok) closeQuick()
 }
 
-async function openSettings(tab: 'account' | 'danmaku' | 'mix' | 'video' | 'relay' | 'about') {
+async function openSettings(
+  tab: 'account' | 'danmaku' | 'multi' | 'mix' | 'video' | 'relay' | 'about'
+) {
   // 设置面板 Teleport 到 body，不在全屏子树里；先退出全屏再打开
   if (document.fullscreenElement) {
     await document.exitFullscreen().catch(() => {})
   }
   drawer.value?.open(tab)
+}
+
+/* ---------- 多路直播间快捷面板（不用进设置里翻） ---------- */
+
+const multiOpen = ref(false)
+const multiInput = ref('')
+
+function toggleMultiPanel() {
+  multiOpen.value = !multiOpen.value
+  if (multiOpen.value) reveal()
+}
+
+async function quickAddSource() {
+  if (store.sourceBusy || !multiInput.value.trim()) return
+  const source = await addSource(multiInput.value)
+  if (source) multiInput.value = ''
+  reveal()
+}
+
+function multiBadge(s: ExtraRoom): string {
+  return badgePreviewText(s.badgeMode, {
+    uname: s.uname,
+    custom: s.badgeText,
+    color: s.color,
+  })
+}
+
+function multiStatus(s: ExtraRoom): string {
+  if (s.audioError) return s.audioError
+  if (s.status === 'failed') return s.error || '连接失败'
+  if (s.status === 'connecting') return '连接中'
+  if (s.status === 'reconnecting') return '重连中'
+  if (s.mediaState === 'error') return '播放失败'
+  if (s.mediaState === 'loading') return '准备中'
+  return ''
+}
+
+function toggleSourceAudio(s: ExtraRoom) {
+  updateSource(s.id, { commentary: !s.commentary })
+}
+
+function toggleSourceVideo(s: ExtraRoom) {
+  updateSource(s.id, { video: !s.video })
 }
 
 function onKey(e: KeyboardEvent) {
@@ -1044,14 +1096,80 @@ onBeforeUnmount(() => {
         </div>
       </Transition>
 
+      <!-- 多路直播间快捷面板 -->
+      <Transition name="fade">
+        <div v-if="controls && multiOpen" class="multi-pop" @pointerdown.stop @click.stop>
+          <div class="mp-head">
+            <span class="mp-title"><AppIcon name="pip" :size="14" />多路直播间</span>
+            <b v-if="store.sources.length">{{ store.sources.length }} 路</b>
+            <button class="mp-more" @click="openSettings('multi')">详细设置</button>
+          </div>
+
+          <div class="mp-import">
+            <input
+              v-model="multiInput"
+              placeholder="房间号或直播间链接"
+              @keydown.enter="quickAddSource"
+            />
+            <button
+              class="mp-add"
+              :disabled="store.sourceBusy || !multiInput.trim()"
+              @click="quickAddSource"
+            >
+              {{ store.sourceBusy ? '…' : '添加' }}
+            </button>
+          </div>
+          <p v-if="store.sourceError" class="mp-err">{{ store.sourceError }}</p>
+
+          <div v-for="s in store.sources" :key="s.id" class="mp-row">
+            <span class="mp-badge" :style="{ background: s.color }">{{ multiBadge(s) }}</span>
+            <span class="mp-who">
+              <strong>{{ s.uname || s.title || `房间 ${s.roomId}` }}</strong>
+              <small v-if="multiStatus(s)">{{ multiStatus(s) }}</small>
+            </span>
+            <button
+              class="mp-toggle"
+              :class="{ on: s.commentary }"
+              :title="s.commentary ? '关闭这一路声音' : '打开这一路声音'"
+              @click="toggleSourceAudio(s)"
+            >
+              <AppIcon :name="s.commentary ? 'volume' : 'volume-off'" :size="14" />
+              <span>声音</span>
+            </button>
+            <button
+              class="mp-toggle"
+              :class="{ on: s.video }"
+              :title="s.video ? '从多路画面移除' : '加入多路画面'"
+              @click="toggleSourceVideo(s)"
+            >
+              <AppIcon name="pip" :size="14" />
+              <span>画面</span>
+            </button>
+            <button class="mp-remove" title="移除这个直播间" @click="removeSource(s.id)">
+              <AppIcon name="close" :size="13" />
+            </button>
+          </div>
+
+          <p v-if="!store.sources.length" class="mp-empty">
+            粘贴其他直播间，就能把它的弹幕、声音、画面加进来。
+          </p>
+        </div>
+      </Transition>
+
       <!-- 底部控制条 -->
       <Transition name="up">
         <div v-if="controls" class="bottombar">
           <button class="dock-play" :title="store.playing ? '暂停' : '播放'" @click="togglePlay">
-            <AppIcon :name="store.playing ? 'pause' : 'play'" :size="20" />
+            <AppIcon :name="store.playing ? 'pause' : 'play'" :size="18" />
+            <span>{{ store.playing ? '暂停' : '播放' }}</span>
           </button>
           <span class="dock-sep"></span>
-          <button class="dock-btn" :disabled="store.swapping" @click="swap">
+          <button
+            class="dock-btn"
+            title="切换 A / B 画面"
+            :disabled="store.swapping"
+            @click="swap"
+          >
             <AppIcon name="swap" :size="17" />
             <span>{{ store.swapping ? '切换中' : '切画面' }}</span>
           </button>
@@ -1067,8 +1185,8 @@ onBeforeUnmount(() => {
           <button
             class="dock-btn"
             :class="{ on: store.sources.length > 0 }"
-            title="导入更多直播间的弹幕 / 声音 / 画面"
-            @click="openSettings('danmaku')"
+            title="添加多路直播间：弹幕 / 声音 / 画面"
+            @click="toggleMultiPanel"
           >
             <AppIcon name="plus" :size="17" />
             <span>多路</span>
@@ -1090,18 +1208,21 @@ onBeforeUnmount(() => {
             <AppIcon name="quality" :size="17" />
             <span>画面</span>
           </button>
-          <button class="dock-btn icon-only" title="画中画" @click="enterPip">
+          <button class="dock-btn" title="画中画" @click="enterPip">
             <AppIcon name="pip" :size="17" />
+            <span>画中画</span>
           </button>
-          <button class="dock-btn icon-only" title="设置" @click="openSettings('danmaku')">
-            <AppIcon name="settings" :size="18" />
+          <button class="dock-btn" title="设置" @click="openSettings('account')">
+            <AppIcon name="settings" :size="17" />
+            <span>设置</span>
           </button>
           <button
-            class="dock-btn icon-only dock-fs"
+            class="dock-btn dock-fs"
             :title="isFullscreen ? '退出全屏' : '全屏'"
             @click="toggleFullscreen"
           >
-            <AppIcon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" :size="19" />
+            <AppIcon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" :size="17" />
+            <span>{{ isFullscreen ? '退出' : '全屏' }}</span>
           </button>
         </div>
       </Transition>
@@ -1424,7 +1545,7 @@ onBeforeUnmount(() => {
 
 /* 全屏底栏更高，提示条跟着抬高，别压到按钮上 */
 .video-zone:fullscreen .err-banner {
-  bottom: calc(76px + var(--safe-bottom));
+  bottom: calc(84px + var(--safe-bottom));
 }
 
 .video-b {
@@ -1698,10 +1819,10 @@ onBeforeUnmount(() => {
   right: calc(8px + var(--safe-right));
   bottom: calc(8px + var(--safe-bottom));
   display: flex;
-  align-items: center;
-  gap: 3px;
-  padding: 5px 7px;
-  border-radius: 20px;
+  align-items: stretch;
+  gap: 2px;
+  padding: 4px 6px;
+  border-radius: 18px;
   background: linear-gradient(180deg, rgba(30, 27, 23, 0.78), rgba(16, 14, 12, 0.72));
   border: 1px solid rgba(255, 255, 255, 0.1);
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.36);
@@ -1710,49 +1831,68 @@ onBeforeUnmount(() => {
   justify-content: space-between;
 }
 
+/* 每个按钮都是「图标 + 短文字」，不用猜图标是什么意思 */
 .dock-play {
-  width: 40px;
-  height: 40px;
+  height: 46px;
+  min-width: 46px;
+  padding: 2px 10px;
   flex: 0 0 auto;
   border: none;
-  border-radius: 50%;
+  border-radius: 14px;
   background: var(--accent);
   color: #fff;
-  display: grid;
-  place-items: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  font-size: 9.5px;
+  font-weight: 650;
   cursor: pointer;
   box-shadow: 0 6px 16px rgba(217, 119, 87, 0.35);
 }
 
+.dock-play span {
+  line-height: 1;
+}
+
 .dock-play:active {
-  transform: scale(0.93);
+  transform: scale(0.96);
 }
 
 .dock-sep {
   width: 1px;
-  height: 20px;
+  height: 26px;
   background: rgba(255, 255, 255, 0.13);
   margin: 0 3px;
   flex: 0 0 auto;
+  align-self: center;
 }
 
 .dock-btn {
-  height: 36px;
-  flex: 0 0 auto;
+  height: 46px;
+  flex: 0 1 auto;
+  min-width: 40px;
   display: inline-flex;
+  flex-direction: column;
   align-items: center;
-  gap: 5px;
+  justify-content: center;
+  gap: 3px;
   border: none;
   border-radius: 12px;
   background: transparent;
   color: rgba(255, 248, 239, 0.62);
-  padding: 0 9px;
-  font-size: 11px;
+  padding: 2px 8px;
+  font-size: 9.5px;
   white-space: nowrap;
   cursor: pointer;
   transition:
     background 0.15s ease,
     color 0.15s ease;
+}
+
+.dock-btn span {
+  line-height: 1;
 }
 
 .dock-btn:hover {
@@ -1765,16 +1905,10 @@ onBeforeUnmount(() => {
   color: #f2b49e;
 }
 
-.dock-btn.icon-only {
-  width: 34px;
-  padding: 0;
-  justify-content: center;
-}
-
 /* 全屏固定在最右侧，右下角更好按 */
 .bottombar .dock-fs {
   flex: 0 0 auto;
-  width: 40px;
+  min-width: 46px;
   color: #fff8ef;
   background: rgba(217, 119, 87, 0.22);
 }
@@ -1786,6 +1920,193 @@ onBeforeUnmount(() => {
 
 .dock-btn:disabled {
   opacity: 0.45;
+}
+
+/* ---------- 多路快捷面板 ---------- */
+
+.multi-pop {
+  position: absolute;
+  right: calc(10px + var(--safe-right));
+  bottom: calc(66px + var(--safe-bottom));
+  width: min(390px, calc(100% - 20px));
+  max-height: min(58%, calc(100% - 92px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  z-index: 7;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(30, 27, 23, 0.92), rgba(16, 14, 12, 0.9));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(20px);
+  color: #fff8ef;
+}
+
+.mp-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mp-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.mp-head b {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.mp-more {
+  margin-left: auto;
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 248, 239, 0.78);
+  font-size: 10.5px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.mp-import {
+  display: flex;
+  gap: 6px;
+}
+
+.mp-import input {
+  flex: 1;
+  min-width: 0;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff8ef;
+  padding: 0 10px;
+  font-size: 12.5px;
+  outline: none;
+}
+
+.mp-import input::placeholder {
+  color: rgba(255, 248, 239, 0.4);
+}
+
+.mp-add {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 10px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11.5px;
+  font-weight: 650;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.mp-add:disabled {
+  opacity: 0.45;
+}
+
+.mp-err {
+  margin: 0;
+  color: #ffb4a4;
+  font-size: 10.5px;
+}
+
+.mp-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.mp-badge {
+  flex: 0 0 auto;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 5px;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 750;
+}
+
+.mp-who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mp-who strong {
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mp-who small {
+  font-size: 9.5px;
+  color: rgba(255, 248, 239, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mp-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 248, 239, 0.6);
+  font-size: 9.5px;
+  padding: 5px 7px;
+  cursor: pointer;
+}
+
+.mp-toggle.on {
+  background: rgba(217, 119, 87, 0.24);
+  color: #f2b49e;
+}
+
+.mp-remove {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 248, 239, 0.5);
+  cursor: pointer;
+}
+
+.mp-remove:hover {
+  background: rgba(190, 70, 52, 0.5);
+  color: #fff;
+}
+
+.mp-empty {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: rgba(255, 248, 239, 0.5);
 }
 
 /* ---------- A 小窗 ---------- */
@@ -2339,7 +2660,7 @@ onBeforeUnmount(() => {
   left: 50%;
   transform: translateX(-50%);
   width: min(560px, calc(100% - 20px));
-  bottom: calc(64px + var(--safe-bottom));
+  bottom: calc(70px + var(--safe-bottom));
   z-index: 8;
   display: flex;
   align-items: center;
@@ -2386,7 +2707,7 @@ onBeforeUnmount(() => {
 .chat-fab-row {
   position: absolute;
   right: 14px;
-  bottom: calc(65px + var(--safe-bottom));
+  bottom: calc(72px + var(--safe-bottom));
   z-index: 8;
 }
 
@@ -2543,45 +2864,45 @@ onBeforeUnmount(() => {
 /* 手机、小窗和横屏短屏：底部只留一排图标，绝不横向滚动 */
 @media (max-width: 720px), (max-height: 500px) and (orientation: landscape) {
   .bottombar {
-    gap: 2px;
-    padding: 4px;
-    border-radius: 17px;
+    gap: 1px;
+    padding: 3px;
+    border-radius: 15px;
   }
 
   .dock-btn {
     flex: 1 1 0;
     min-width: 0;
-    max-width: 52px;
-    height: 36px;
-    gap: 0;
-    padding: 0;
+    max-width: 58px;
+    height: 44px;
+    gap: 2px;
+    padding: 1px;
     justify-content: center;
-    font-size: 10px;
-  }
-
-  .dock-btn span {
-    display: none;
-  }
-
-  .dock-btn.icon-only {
-    width: auto;
+    font-size: 9px;
   }
 
   .dock-play {
     flex: 0 0 auto;
-    width: 38px;
-    height: 38px;
+    min-width: 44px;
+    height: 44px;
+    padding: 1px 3px;
+    border-radius: 12px;
+    font-size: 9px;
   }
 
   .bottombar .dock-fs {
-    flex: 0 0 42px;
-    width: 42px;
+    flex: 0 0 46px;
+    min-width: 46px;
     max-width: none;
-    height: 38px;
+    height: 44px;
   }
 
   .dock-sep {
     margin: 0 1px;
+    height: 22px;
+  }
+
+  .multi-pop {
+    bottom: calc(64px + var(--safe-bottom));
   }
 }
 

@@ -447,7 +447,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
   gap: 9px;
   padding: 10px 13px;
   border-bottom: 1px solid var(--line);
-  background: rgba(249, 245, 238, 0.9);
+  background: var(--glass-strong);
   backdrop-filter: blur(16px);
 }
 
@@ -656,7 +656,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
 }
 
 .row:hover {
-  background: rgba(255, 253, 249, 0.8);
+  background: var(--glass-strong);
 }
 
 .row:active {
@@ -757,7 +757,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
   margin: 4px 0;
   padding: 9px 10px;
   border-radius: 15px;
-  background: linear-gradient(135deg, #fff5df, #fbe6bd);
+  background: linear-gradient(135deg, var(--gold-card-a), var(--gold-card-b));
   border: 1px solid rgba(185, 132, 46, 0.28);
   animation: fadeUp 0.2s ease;
 }
@@ -796,7 +796,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
 
 .sc-meta strong {
   font-size: 12px;
-  color: #7a5318;
+  color: var(--gold-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -805,7 +805,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
 .sc-price {
   font-size: 10px;
   font-weight: 700;
-  color: #8a5b13;
+  color: var(--gold-text-dim);
   background: rgba(185, 132, 46, 0.14);
   border-radius: 999px;
   padding: 1px 6px;
@@ -816,8 +816,8 @@ defineExpose({ focus: () => focusInput.value?.focus() })
   font-size: 8.5px;
   font-weight: 800;
   letter-spacing: 0.1em;
-  color: #9a6a1b;
-  background: rgba(255, 255, 255, 0.55);
+  color: var(--gold-text-soft);
+  background: var(--gold-chip);
   border-radius: 999px;
   padding: 2px 6px;
 }
@@ -826,7 +826,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
   margin: 3px 0 0;
   font-size: 12.5px;
   line-height: 1.5;
-  color: #5d4318;
+  color: var(--gold-text-body);
   word-break: break-word;
 }
 
@@ -838,7 +838,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
   margin: 2px 2px;
   padding: 4px 7px;
   border-radius: 10px;
-  background: rgba(255, 253, 249, 0.55);
+  background: var(--glass-soft);
 }
 
 .event-icon {
@@ -1048,7 +1048,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  color: #8a5b13;
+  color: var(--gold-text-dim);
   font-weight: 600;
   flex: 0 0 auto;
 }
@@ -1056,7 +1056,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
 .reply-preview {
   flex: 1;
   min-width: 0;
-  color: #8a6a35;
+  color: var(--gold-text-soft);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1065,7 +1065,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
 .reply-x {
   border: none;
   background: rgba(185, 132, 46, 0.14);
-  color: #8a5b13;
+  color: var(--gold-text-dim);
   width: 20px;
   height: 20px;
   border-radius: 50%;

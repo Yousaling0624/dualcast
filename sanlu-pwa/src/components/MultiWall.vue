@@ -137,7 +137,7 @@ onBeforeUnmount(() => {
 .multi-wall {
   position: absolute;
   left: 10px;
-  bottom: 62px;
+  bottom: 70px;
   z-index: 5;
   width: min(40%, 380px);
   max-height: calc(100% - 120px);
@@ -364,7 +364,7 @@ onBeforeUnmount(() => {
   .multi-wall {
     width: min(48%, 230px);
     max-height: calc(100% - 108px);
-    bottom: 54px;
+    bottom: 62px;
   }
 
   .wall-grid {

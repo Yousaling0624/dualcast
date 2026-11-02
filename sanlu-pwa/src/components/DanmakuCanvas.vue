@@ -91,7 +91,8 @@ function layout() {
 
   const d = store.settings.danmaku
   laneH = 20 * d.fontScale * 1.35
-  const widthChanged = Math.abs(rect.width - lastWidth) > 1
+  const widthChanged = lastWidth > 0 && Math.abs(rect.width - lastWidth) > 1
+  const ratio = widthChanged ? rect.width / lastWidth : 1
   lastWidth = rect.width
   for (const it of items) {
     if (ctx) {
@@ -104,8 +105,12 @@ function layout() {
       }
     }
     it.top = it.lane * laneH + 2
-    // 只在画布宽度变化时重新从右侧入场；调透明度/速度不应让弹幕回炉
-    if (!it.sticky && !it.frozen && widthChanged) it.x = rect.width + Math.random() * 40
+    // 画布尺寸变化（全屏 / 切画面）时按比例换算位置和速度：
+    // 已经在飘的弹幕原地继续走，不会整屏回炉重来
+    if (!it.sticky && !it.frozen && widthChanged) {
+      it.x *= ratio
+      it.speed *= ratio
+    }
   }
 }
 

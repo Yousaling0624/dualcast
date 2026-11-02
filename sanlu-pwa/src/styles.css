@@ -58,6 +58,21 @@ body {
   --ok: #3e7c59;
   --ok-soft: rgba(62, 124, 89, 0.12);
 
+  /* 半透明玻璃面板 / 页面渐变 / SC 金色卡片（深浅色各一套） */
+  --glass: rgba(255, 253, 249, 0.62);
+  --glass-strong: rgba(255, 253, 249, 0.8);
+  --glass-soft: rgba(255, 253, 249, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.66);
+  --page-top: #f7f2ea;
+  --page-bottom: #f0e9dc;
+  --gold-card-a: #fff5df;
+  --gold-card-b: #fbe6bd;
+  --gold-chip: rgba(255, 255, 255, 0.55);
+  --gold-text: #7a5318;
+  --gold-text-dim: #8a5b13;
+  --gold-text-soft: #9a6a1b;
+  --gold-text-body: #5d4318;
+
   --radius-xl: 28px;
   --radius-lg: 22px;
   --radius-md: 16px;
@@ -76,6 +91,56 @@ body {
   --safe-bottom: env(safe-area-inset-bottom, 0px);
   --safe-left: env(safe-area-inset-left, 0px);
   --safe-right: env(safe-area-inset-right, 0px);
+}
+
+/* 深色主题：暖炭色，保留同一个珊瑚橙强调色。
+   App.vue 根据「跟随系统 / 浅色 / 深色」把 data-theme 写到 <html> 上 */
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #141210;
+  --bg-soft: #1a1715;
+  --surface: #211e1a;
+  --surface-2: #2a2621;
+  --surface-3: #363029;
+  --text: #efe8de;
+  --text-dim: #b0a696;
+  --text-faint: #83796b;
+  --line: rgba(239, 232, 222, 0.12);
+  --line-strong: rgba(239, 232, 222, 0.22);
+
+  --accent: #e08a68;
+  --accent-strong: #f0a184;
+  --accent-soft: rgba(224, 138, 104, 0.18);
+  --on-accent: #2a140a;
+
+  --accent-2: #8b9bdf;
+  --accent-2-soft: rgba(139, 155, 223, 0.18);
+
+  --gold: #d9a75a;
+  --gold-soft: rgba(217, 167, 90, 0.2);
+  --danger: #e07a6c;
+  --danger-soft: rgba(224, 122, 108, 0.18);
+  --ok: #7fb894;
+  --ok-soft: rgba(127, 184, 148, 0.18);
+
+  --shadow-soft: 0 22px 60px rgba(0, 0, 0, 0.5);
+  --shadow-card: 0 8px 28px rgba(0, 0, 0, 0.4);
+  --shadow-float: 0 16px 44px rgba(0, 0, 0, 0.55);
+
+  --glass: rgba(33, 30, 26, 0.72);
+  --glass-strong: rgba(36, 33, 29, 0.84);
+  --glass-soft: rgba(33, 30, 26, 0.62);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --page-top: #191613;
+  --page-bottom: #12100e;
+  --gold-card-a: rgba(92, 70, 33, 0.42);
+  --gold-card-b: rgba(63, 48, 24, 0.46);
+  --gold-chip: rgba(255, 255, 255, 0.12);
+  --gold-text: #ecc98e;
+  --gold-text-dim: #dcb877;
+  --gold-text-soft: #cfa95f;
+  --gold-text-body: #e8d5b0;
 }
 
 button {

@@ -128,7 +128,7 @@ onBeforeUnmount(() => {
         <div class="brand-text">
           <div class="brand-line">
             <h1>叠播</h1>
-            <span class="ver">v1.7.5</span>
+            <span class="ver">v1.8.0</span>
           </div>
           <p>DualCast · 两个直播间一起看</p>
         </div>
@@ -370,7 +370,7 @@ onBeforeUnmount(() => {
   background:
     radial-gradient(900px 500px at 88% -12%, rgba(217, 119, 87, 0.15), transparent 62%),
     radial-gradient(760px 480px at -8% 42%, rgba(102, 121, 207, 0.11), transparent 64%),
-    linear-gradient(180deg, #f7f2ea 0%, var(--bg) 40%, #f0e9dc 100%);
+    linear-gradient(180deg, var(--page-top) 0%, var(--bg) 40%, var(--page-bottom) 100%);
 }
 
 .ambient {
@@ -631,7 +631,7 @@ onBeforeUnmount(() => {
   gap: 5px;
   font-size: 11.5px;
   color: var(--text-dim);
-  background: rgba(255, 253, 249, 0.75);
+  background: var(--glass-strong);
   border: 1px solid var(--line);
   border-radius: 999px;
   padding: 5px 10px;
@@ -670,7 +670,7 @@ onBeforeUnmount(() => {
   bottom: 0;
   width: 196px;
   height: 122px;
-  background: linear-gradient(150deg, #fff8ee, #f6e7d3);
+  background: linear-gradient(150deg, var(--surface), var(--surface-2));
   transform: rotate(-3deg);
   z-index: 2;
 }
@@ -948,8 +948,8 @@ onBeforeUnmount(() => {
 
 .stage {
   border-radius: var(--radius-xl);
-  background: rgba(255, 253, 249, 0.62);
-  border: 1px solid rgba(255, 255, 255, 0.66);
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
   box-shadow: 0 24px 60px rgba(74, 55, 34, 0.08);
   padding: 18px;
   backdrop-filter: blur(18px);
@@ -1357,7 +1357,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 9px;
-  background: rgba(255, 253, 249, 0.7);
+  background: var(--glass);
   border: 1px solid var(--line);
   color: var(--text);
   border-radius: 16px;
@@ -1432,7 +1432,7 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   padding: 3px 9px;
   white-space: nowrap;
-  background: rgba(255, 253, 249, 0.6);
+  background: var(--glass-soft);
 }
 
 .mode i {
