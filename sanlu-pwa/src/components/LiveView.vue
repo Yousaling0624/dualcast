@@ -180,14 +180,26 @@ const firstError = computed(
 
 function reveal() {
   controls.value = true
+  exitMiniImmersive()
   if (hideTimer) clearTimeout(hideTimer)
   hideTimer = window.setTimeout(() => {
     if (quickTarget.value) return
-    controls.value = false
-    qualityOpen.value = false
+    hideControls()
   }, 4600)
 }
 
+function hideControls() {
+  controls.value = false
+  qualityOpen.value = false
+  // 主画面控件和小窗按钮统一成一套沉浸状态：收就一起收
+  if (miniOn.value && !miniExpanded.value) miniImmersive.value = true
+  if (hideTimer) {
+    clearTimeout(hideTimer)
+    hideTimer = null
+  }
+}
+
+/** B 站移动端式：控件开着就收掉；关着时点空白处唤出，点弹幕则冻结查看 */
 function onZoneTap(e: PointerEvent) {
   const t = e.target as HTMLElement
   if (
@@ -196,6 +208,15 @@ function onZoneTap(e: PointerEvent) {
     )
   )
     return
+  if (quickTarget.value) {
+    closeQuick()
+    return
+  }
+  // 控件开着时第一下先收起来：弹幕密集时也不会点中弹幕而收不掉按钮
+  if (controls.value) {
+    hideControls()
+    return
+  }
   const el = zoneEl.value
   if (el && dmCanvas.value) {
     const rect = el.getBoundingClientRect()
@@ -204,10 +225,6 @@ function onZoneTap(e: PointerEvent) {
       openQuick(hit, 'click')
       return
     }
-  }
-  if (quickTarget.value) {
-    closeQuick()
-    return
   }
   reveal()
 }
@@ -250,7 +267,8 @@ function pointerInRect(e: PointerEvent, hit: DmHit | null): boolean {
  * 鼠标移开后 550ms 自动恢复飘动；触屏走点击逻辑。
  */
 function onZoneMove(e: PointerEvent) {
-  reveal()
+  // 触屏只在点按时切换控件；鼠标移动仍然自动唤出，贴近桌面播放器习惯
+  if (e.pointerType === 'mouse') reveal()
   if (!hoverCapable || e.pointerType !== 'mouse') return
   const t = e.target as HTMLElement
   if (t.closest('.quickbar')) {
@@ -367,11 +385,17 @@ function exitMiniImmersive() {
 }
 
 function scheduleMiniTap() {
+  // 小窗全屏时顶部按钮还要用来裁切 / 退出，不参与点按沉浸
+  if (miniExpanded.value) return
   if (miniTapTimer) clearTimeout(miniTapTimer)
+  // 先记住这一下要进入还是退出，避免 240ms 内自动隐藏先改了状态
+  const target = !miniImmersive.value
   miniTapTimer = window.setTimeout(() => {
     miniTapTimer = null
-    miniImmersive.value = !miniImmersive.value
-    if (miniImmersive.value) {
+    miniImmersive.value = target
+    if (target) {
+      // 小窗也进入沉浸时，把主画面控件一起收掉，避免两层按钮同时挡画面
+      hideControls()
       miniImmHint.value = true
       if (miniHintTimer) clearTimeout(miniHintTimer)
       miniHintTimer = window.setTimeout(() => {
@@ -444,7 +468,6 @@ function onMiniPointerDown(e: PointerEvent) {
       wy: miniPos.value.y,
     }
   }
-  reveal()
 }
 
 function onMiniPointerMove(e: PointerEvent) {
@@ -2178,6 +2201,8 @@ onBeforeUnmount(() => {
   font-size: 11.5px;
   backdrop-filter: blur(16px);
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.35);
+  /* 错误条可能压在小窗上，只让按钮接点击，画面照常可以点按 */
+  pointer-events: none;
 }
 
 .err-banner span {
@@ -2186,6 +2211,7 @@ onBeforeUnmount(() => {
 }
 
 .err-banner button {
+  pointer-events: auto;
   border: none;
   background: rgba(255, 255, 255, 0.12);
   color: #fff;
