@@ -896,13 +896,6 @@ onBeforeUnmount(() => {
               {{ qnLabel }}
               <AppIcon name="chevron-down" :size="13" />
             </button>
-            <button
-              class="ib"
-              :title="isFullscreen ? '退出全屏' : '全屏'"
-              @click="toggleFullscreen"
-            >
-              <AppIcon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" :size="19" />
-            </button>
           </div>
         </div>
       </Transition>
@@ -966,11 +959,11 @@ onBeforeUnmount(() => {
             <AppIcon name="sc" :size="17" />
             <span>SC</span>
           </button>
-          <button class="dock-btn" title="混音与延迟" @click="openSettings('mix')">
+          <button class="dock-btn dock-optional dock-mix" title="混音与延迟" @click="openSettings('mix')">
             <AppIcon name="tune" :size="17" />
             <span>混音</span>
           </button>
-          <button class="dock-btn" title="画面设置" @click="openSettings('video')">
+          <button class="dock-btn dock-optional dock-video" title="画面设置" @click="openSettings('video')">
             <AppIcon name="quality" :size="17" />
             <span>画面</span>
           </button>
@@ -979,6 +972,13 @@ onBeforeUnmount(() => {
           </button>
           <button class="dock-btn icon-only" title="设置" @click="openSettings('danmaku')">
             <AppIcon name="settings" :size="18" />
+          </button>
+          <button
+            class="dock-btn icon-only dock-fs"
+            :title="isFullscreen ? '退出全屏' : '全屏'"
+            @click="toggleFullscreen"
+          >
+            <AppIcon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" :size="19" />
           </button>
         </div>
       </Transition>
@@ -1569,12 +1569,7 @@ onBeforeUnmount(() => {
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.36);
   backdrop-filter: blur(22px) saturate(1.15);
   z-index: 5;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.bottombar::-webkit-scrollbar {
-  display: none;
+  justify-content: flex-start;
 }
 
 .dock-play {
@@ -1615,6 +1610,7 @@ onBeforeUnmount(() => {
   color: rgba(255, 248, 239, 0.62);
   padding: 0 9px;
   font-size: 11px;
+  white-space: nowrap;
   cursor: pointer;
   transition:
     background 0.15s ease,
@@ -1635,6 +1631,20 @@ onBeforeUnmount(() => {
   width: 34px;
   padding: 0;
   justify-content: center;
+}
+
+/* 全屏固定在最右侧，右下角更好按 */
+.bottombar .dock-fs {
+  flex: 0 0 auto;
+  width: 40px;
+  margin-left: auto;
+  color: #fff8ef;
+  background: rgba(217, 119, 87, 0.22);
+}
+
+.dock-fs:hover {
+  color: #fff;
+  background: rgba(217, 119, 87, 0.36);
 }
 
 .dock-btn:disabled {
@@ -2271,7 +2281,9 @@ onBeforeUnmount(() => {
   }
 
   .live :deep(.chat) {
-    width: clamp(280px, 38vw, 400px);
+    /* 不跟画面平分宽度：横屏优先把空间留给视频 */
+    flex: 0 0 clamp(280px, 38vw, 400px);
+    width: auto;
     height: 100dvh;
   }
 
@@ -2317,13 +2329,13 @@ onBeforeUnmount(() => {
   }
 
   .bottombar {
-    left: 50%;
-    right: auto;
-    transform: translateX(-50%);
+    left: auto;
+    right: 14px;
+    transform: none;
     width: max-content;
-    max-width: calc(100% - 40px);
-    bottom: 16px;
-    padding: 6px 9px;
+    max-width: calc(100% - 28px);
+    bottom: 14px;
+    padding: 6px 8px;
   }
 
   .video-zone.mini-open :deep(.sc-overlay) {
@@ -2384,30 +2396,69 @@ onBeforeUnmount(() => {
     font-size: 10px;
   }
 
+  .video-zone.mini-open :deep(.sc-overlay) {
+    width: min(240px, calc(100% - 150px));
+  }
+}
+
+/* 手机、小窗和横屏短屏：底部只留一排图标，绝不横向滚动 */
+@media (max-width: 720px), (max-height: 500px) and (orientation: landscape) {
   .bottombar {
-    gap: 1px;
-    padding: 4px 5px;
+    gap: 2px;
+    padding: 4px;
     border-radius: 17px;
   }
 
   .dock-btn {
-    height: 34px;
-    gap: 4px;
-    padding: 0 7px;
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: 52px;
+    height: 36px;
+    gap: 0;
+    padding: 0;
+    justify-content: center;
     font-size: 10px;
   }
 
+  .dock-btn span {
+    display: none;
+  }
+
   .dock-btn.icon-only {
-    width: 31px;
+    width: auto;
   }
 
   .dock-play {
-    width: 37px;
-    height: 37px;
+    flex: 0 0 auto;
+    width: 38px;
+    height: 38px;
   }
 
-  .video-zone.mini-open :deep(.sc-overlay) {
-    width: min(240px, calc(100% - 150px));
+  .bottombar .dock-fs {
+    flex: 0 0 42px;
+    width: 42px;
+    max-width: none;
+    height: 38px;
+    margin-left: auto;
+  }
+
+  .dock-sep {
+    margin: 0 1px;
+  }
+}
+
+/* 手机 / 小屏横屏先收起「画面设置」，把空间留给常用按钮 */
+@media (max-width: 720px), (max-height: 500px) and (max-width: 900px) and (orientation: landscape) {
+  .bottombar .dock-video,
+  .bottombar .dock-sep {
+    display: none;
+  }
+}
+
+/* 超窄屏再把「混音」也收进设置面板，保证其余按钮够大 */
+@media (max-width: 350px) {
+  .bottombar .dock-mix {
+    display: none;
   }
 }
 

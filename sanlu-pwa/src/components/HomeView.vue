@@ -128,7 +128,7 @@ onBeforeUnmount(() => {
         <div class="brand-text">
           <div class="brand-line">
             <h1>叠播</h1>
-            <span class="ver">v1.7.1</span>
+            <span class="ver">v1.7.2</span>
           </div>
           <p>DualCast · 两个直播间一起看</p>
         </div>
