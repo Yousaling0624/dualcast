@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { store } from '../lib/store'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { shouldShowSourceBadges, store } from '../lib/store'
 import type { ChatMsg } from '../lib/danmaku'
 import AppIcon from './AppIcon.vue'
 
@@ -13,6 +13,7 @@ interface ActiveSc {
 const active = ref<ActiveSc[]>([])
 const timers = new Map<number, number>()
 let lastSeq = 0
+const showSourceBadges = computed(() => shouldShowSourceBadges())
 
 function avatarUrl(u?: string): string {
   if (!u) return ''
@@ -94,6 +95,18 @@ watch(
   () => trimToMax()
 )
 
+// 关掉 A+B 同屏时，B 路已经浮出的 SC 也一起收掉
+watch(
+  () => store.settings.danmaku.includeB,
+  (on) => {
+    if (on) return
+    for (const item of active.value) {
+      if (item.msg.sourceId === 'b') clearTimer(item.key)
+    }
+    active.value = active.value.filter((x) => x.msg.sourceId !== 'b')
+  }
+)
+
 onMounted(() => {
   drain()
 })
@@ -123,7 +136,7 @@ onBeforeUnmount(clearAll)
         <div class="sc-content">
           <div class="sc-meta">
             <span
-              v-if="store.sources.length && item.msg.sourceColor"
+              v-if="showSourceBadges && item.msg.sourceColor"
               class="sc-src"
               :class="{ dot: !item.msg.badge }"
               :style="{ background: item.msg.sourceColor }"

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { feedBuffer, store } from '../lib/store'
+import { feedBuffer, shouldShowSourceBadges, store } from '../lib/store'
 import type { ChatMsg } from '../lib/danmaku'
 
 const canvas = ref<HTMLCanvasElement | null>(null)
@@ -68,7 +68,7 @@ function colorOf(m: ChatMsg): string {
 }
 
 function showSourceBadges(): boolean {
-  return store.sources.length > 0
+  return shouldShowSourceBadges()
 }
 
 function badgeWidth(c: CanvasRenderingContext2D, text: string, scale: number): number {

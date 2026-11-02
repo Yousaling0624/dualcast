@@ -2,7 +2,8 @@
  * 全局状态与会话编排：解析房间 → 双路播放 → A 房弹幕 → 聊天室 / 发弹幕。
  *
  * 设计对齐 Android 版：
- * - A 路负责弹幕和声音，B 路负责画面（也可以出声音）；
+ * - A 路负责弹幕和声音，B 路负责画面（也可以出声音、同屏弹幕）；
+ * - 导入直播间可额外提供弹幕、声音和画面（多路墙）；
  * - 音量/音画偏移按「A 房间 + B 房间」组合记忆；
  * - 聊天室里点一条弹幕可以 +1 / 回复，B 站没有楼中楼，
  *   回复直接拼成「回复内容@昵称:原话」发出去；
@@ -33,9 +34,11 @@ import { clampOffset, offsetsForSession } from './sync'
 import {
   badgeForSource,
   firstGlyph,
+  needsSourceBadges,
   normalizeBadgeText,
   PRIMARY_SOURCE_COLOR,
   roomColor,
+  SECONDARY_SOURCE_COLOR,
   type BadgeMode,
 } from './sources'
 
@@ -85,7 +88,9 @@ export interface RecentRoom {
 /**
  * 导入的额外直播间：
  * - 总是订阅该房间的弹幕；
- * - 打开 commentary 后，还会把这一路的声音混进解说（比赛画面仍然只有 B 路）。
+ * - 打开 commentary 后，把这一路的声音混进解说；
+ * - 打开 video 后，还会在画面左下角的多路墙里显示这一路直播。
+ * 声音和画面可以只开一个，也可以同时开。
  */
 export interface ExtraRoom {
   id: string
@@ -103,18 +108,25 @@ export interface ExtraRoom {
   badgeMode: BadgeMode
   badgeText: string
   color: string
+  /** 混入多路声音 */
   commentary: boolean
+  /** 加入多路画面（左下角小窗墙） */
+  video: boolean
   volume: number
   status: DanmakuStatus
   error: string
-  /** 单独的混音错误，避免和弹幕连接错误互相覆盖 */
+  /** 媒体（声音 / 画面）的单独错误，避免和弹幕连接错误互相覆盖 */
   audioError: string
+  /** 媒体播放状态，多路墙用来显示加载 / 失败提示 */
+  mediaState: 'idle' | 'loading' | 'playing' | 'error'
   blocked: boolean
 }
 
 export interface Settings {
   danmaku: {
     enabled: boolean
+    /** 把 B 路（比赛画面）直播间的弹幕也合并到同一屏 */
+    includeB: boolean
     fontScale: number
     alpha: number
     speed: number
@@ -164,6 +176,7 @@ const QUOTE_RESERVE = 3
 const DEFAULT_SETTINGS: Settings = {
   danmaku: {
     enabled: true,
+    includeB: false,
     fontScale: 1,
     alpha: 0.94,
     speed: 1,
@@ -228,6 +241,7 @@ function loadSettings(): Settings {
       s.danmaku.style = raw.danmaku.outline ? 'outline' : 'shadow'
     }
     if (typeof raw.danmaku.bold !== 'boolean') s.danmaku.bold = true
+    if (typeof s.danmaku.includeB !== 'boolean') s.danmaku.includeB = false
     if (!Array.isArray(s.danmaku.blocked)) s.danmaku.blocked = []
   }
   if (raw.video && typeof raw.video === 'object') {
@@ -318,12 +332,14 @@ function normalizeSource(raw: any): ExtraRoom | null {
     badgeText: normalizeBadgeText(String(raw?.badgeText || '')),
     color,
     commentary: !!raw?.commentary,
+    video: !!raw?.video,
     volume: Number.isFinite(Number(raw?.volume))
       ? Math.max(0, Math.min(1, Number(raw.volume)))
       : 0.6,
     status: 'idle',
     error: '',
     audioError: '',
+    mediaState: 'idle',
     blocked: false,
   }
 }
@@ -358,6 +374,7 @@ function sourceRecord(s: ExtraRoom) {
     badgeText: s.badgeText,
     color: s.color,
     commentary: s.commentary,
+    video: s.video,
     volume: s.volume,
   }
 }
@@ -376,6 +393,9 @@ export const store = reactive({
   viewer: 0,
   danmakuStatus: 'idle' as DanmakuStatus,
   danmakuError: '',
+  /** B 路同屏弹幕的连接状态（只有 includeB 打开时才有意义） */
+  bDanmakuStatus: 'idle' as DanmakuStatus,
+  bDanmakuError: '',
   loggedIn: hasCookie(),
   account: loadAccount(),
   starting: false,
@@ -406,6 +426,8 @@ export const store = reactive({
 /* ---------- 非响应式实例 ---------- */
 
 const danmaku = new DanmakuClient()
+/** A+B 同屏时，B 路单独一条弹幕连接 */
+const danmakuB = new DanmakuClient()
 let playerA: StreamPlayer | null = null
 let playerB: StreamPlayer | null = null
 let videoAEl: HTMLVideoElement | null = null
@@ -413,9 +435,17 @@ let videoBEl: HTMLVideoElement | null = null
 
 /** 导入房间各自的弹幕连接 */
 const extraClients = new Map<string, DanmakuClient>()
-/** 导入房间中「加入解说」的那几路：隐藏 video + 播放器 */
-const extraPlayers = new Map<string, { video: HTMLVideoElement; player: StreamPlayer }>()
+/**
+ * 导入房间中「加入多路声音 / 画面」的那几路。
+ * 只开声音时用屏幕外的隐藏 video；开画面时复用多路墙里的可见 video。
+ */
+const extraPlayers = new Map<
+  string,
+  { video: HTMLVideoElement; player: StreamPlayer; mode: 'hidden' | 'visible' }
+>()
 const extraPlayerPending = new Set<string>()
+/** 多路墙挂载的可见 video 元素；store 负责在上面创建播放器 */
+const sourceVideoEls = new Map<string, HTMLVideoElement>()
 
 const slotStreams: Record<'a' | 'b', StreamSet> = {
   a: { flv: [], hls: [] },
@@ -445,6 +475,17 @@ watch(
   () => [store.a.input, store.b.input],
   () => persistSlots(),
   { deep: true }
+)
+
+watch(
+  () => store.settings.danmaku.includeB,
+  (on) => {
+    if (on) {
+      connectBDanmaku()
+    } else {
+      disconnectBDanmaku()
+    }
+  }
 )
 
 /* ---------- 消息 ---------- */
@@ -479,7 +520,7 @@ interface SourceMeta {
   badge: string
 }
 
-/** 消息来源的展示信息；主房间固定为 A。 */
+/** 消息来源的展示信息；主房间固定为 A，B 路同屏时单独用蓝色区分。 */
 export function sourceMeta(sourceId?: string): SourceMeta | null {
   if (!sourceId || sourceId === 'a') {
     return {
@@ -488,6 +529,15 @@ export function sourceMeta(sourceId?: string): SourceMeta | null {
       name: store.a.uname || store.a.title || 'A 房间',
       color: PRIMARY_SOURCE_COLOR,
       badge: firstGlyph(store.a.uname) || 'A',
+    }
+  }
+  if (sourceId === 'b') {
+    return {
+      id: 'b',
+      roomId: store.b.roomId,
+      name: store.b.uname || store.b.title || 'B 房间',
+      color: SECONDARY_SOURCE_COLOR,
+      badge: firstGlyph(store.b.uname) || 'B',
     }
   }
   const s = store.sources.find((x) => x.id === sourceId)
@@ -504,6 +554,15 @@ export function sourceMeta(sourceId?: string): SourceMeta | null {
     color: badge.color,
     badge: badge.text,
   }
+}
+
+/** 同屏来源不止 A 路时，才需要显示颜色气泡。 */
+export function shouldShowSourceBadges(): boolean {
+  return needsSourceBadges(
+    store.sources.length,
+    store.settings.danmaku.includeB,
+    store.b.roomId > 0 && store.b.roomId !== store.a.roomId
+  )
 }
 
 function enrichMessage(m: ChatMsg, sourceId: string): ChatMsg {
@@ -809,6 +868,8 @@ function beginSession() {
   applyRoomProfile()
   store.commentaryOn = store.settings.commentaryWindow
   store.danmakuError = ''
+  store.bDanmakuError = ''
+  store.bDanmakuStatus = 'idle'
   store.viewer = store.a.online
   // 播放器等 LiveView 挂载、拿到 video 元素后再绑定（见 LiveView onMounted）
   connectAllDanmaku()
@@ -861,8 +922,68 @@ function connectDanmaku() {
   })
 }
 
+/**
+ * 单独连接 B 路弹幕。只在「A+B 同屏」打开时建立，
+ * 和 A 路共用聊天室 / 弹幕画布，用蓝色气泡 + B 主播首字区分。
+ */
+function connectBDanmaku() {
+  danmakuB.stop()
+  store.bDanmakuError = ''
+  store.bDanmakuStatus = 'idle'
+  if (!store.settings.danmaku.includeB || store.view !== 'live') return
+  const roomId = store.b.roomId
+  if (!roomId || roomId === store.a.roomId) return
+  store.bDanmakuStatus = 'connecting'
+  const buvid = getCookieValue('buvid3')
+  danmakuB
+    .connect(roomId, store.account.mid || 0, buvid, {
+      onMsg: (m) => ingest('b', m),
+      onStatus: (s, err) => {
+        store.bDanmakuStatus = s
+        store.bDanmakuError = err || ''
+      },
+      onViewer: () => {},
+    })
+    .catch(() => {})
+
+  void fetchDanmakuHistory(roomId).then((list) => {
+    if (roomId !== store.b.roomId || !store.settings.danmaku.includeB) return
+    insertHistory(
+      'b',
+      list.map((h, i) => ({
+        seq: 0,
+        kind: 'danmu' as const,
+        text: h.text,
+        uname: h.uname,
+        uid: h.uid,
+        dmid: h.dmid || `b-history-${i}`,
+        color: h.color,
+        medal: h.medal,
+        history: true,
+      }))
+    )
+  })
+}
+
+/** 从聊天室、SC 队列和待绘制队列里清掉某个来源的消息 */
+function purgeSourceMessages(sourceId: string) {
+  store.messages = store.messages.filter((m) => m.sourceId !== sourceId)
+  store.scFeed = store.scFeed.filter((m) => m.sourceId !== sourceId)
+  for (let i = feedBuffer.length - 1; i >= 0; i--) {
+    if (feedBuffer[i].sourceId === sourceId) feedBuffer.splice(i, 1)
+  }
+}
+
+function disconnectBDanmaku() {
+  danmakuB.stop()
+  store.bDanmakuStatus = 'idle'
+  store.bDanmakuError = ''
+  purgeSourceMessages('b')
+}
+
 function connectAllDanmaku() {
   connectDanmaku()
+  connectBDanmaku()
   for (const source of store.sources) connectSource(source)
 }
 
@@ -938,8 +1059,11 @@ function destroyExtraPlayer(sourceId: string) {
   const entry = extraPlayers.get(sourceId)
   if (!entry) return
   entry.player.destroy()
-  entry.video.remove()
+  // 可见 video 由 Vue 管理，不能从 DOM 里 remove；隐藏 audio video 才需要清理
+  if (entry.mode === 'hidden') entry.video.remove()
   extraPlayers.delete(sourceId)
+  const s = store.sources.find((x) => x.id === sourceId)
+  if (s) s.mediaState = 'idle'
 }
 
 function destroyAllExtraPlayers() {
@@ -955,45 +1079,107 @@ function streamsFromPlay(play: RoomPlay): StreamSet {
   return set
 }
 
+function sourceVolume(source: ExtraRoom): number {
+  return source.commentary ? source.volume : 0
+}
+
 /**
- * 为「加入解说」的房间创建隐藏播放器。
- * 只取声音：video 放在屏幕外、不参与布局；画面始终只有 B 路。
+ * 让某个导入房间的播放器与当前设置保持一致：
+ * - 声音 + 画面：复用多路墙里的可见 video；
+ * - 只要声音：创建屏幕外的隐藏 video；
+ * - 都不要：销毁播放器。
+ * 画面开关先于 video 挂载生效时，等 MultiWall 调用 attachSourceVideo。
  */
-async function ensureExtraPlayer(source: ExtraRoom) {
-  if (!source.commentary || store.view !== 'live') return
-  if (duplicateSource(source)) {
-    source.audioError = '这个直播间已经在 A / B 路，不能重复混音'
+function syncSourcePlayer(source: ExtraRoom) {
+  if (store.view !== 'live') {
+    destroyExtraPlayer(source.id)
     return
   }
-  if (extraPlayers.has(source.id) || extraPlayerPending.has(source.id)) return
+  if (!source.commentary && !source.video) {
+    destroyExtraPlayer(source.id)
+    source.blocked = false
+    source.audioError = ''
+    source.mediaState = 'idle'
+    return
+  }
+  if (duplicateSource(source)) {
+    destroyExtraPlayer(source.id)
+    source.audioError = '这个直播间已经在 A / B 路，不能重复播放'
+    source.mediaState = 'idle'
+    return
+  }
+
+  const visible = source.video ? sourceVideoEls.get(source.id) || null : null
+  if (source.video && !visible) {
+    // 等多路墙把这个房间的 video 挂上来；挂上后会再调用一次
+    destroyExtraPlayer(source.id)
+    source.audioError = ''
+    return
+  }
+
+  const existing = extraPlayers.get(source.id)
+  const mode = visible ? 'visible' : 'hidden'
+  if (existing) {
+    if (existing.mode === mode && existing.video === (visible || existing.video)) {
+      existing.player.setVolume(sourceVolume(source))
+      existing.player.setSyncOffset(offsetFor('a'))
+      return
+    }
+    destroyExtraPlayer(source.id)
+  }
+  void ensureExtraPlayer(source)
+}
+
+async function ensureExtraPlayer(source: ExtraRoom) {
+  if (store.view !== 'live') return
+  if (!source.commentary && !source.video) return
+  if (duplicateSource(source)) {
+    source.audioError = '这个直播间已经在 A / B 路，不能重复播放'
+    source.mediaState = 'idle'
+    return
+  }
+  if (extraPlayerPending.has(source.id) || extraPlayers.has(source.id)) return
   extraPlayerPending.add(source.id)
   source.audioError = ''
+  source.mediaState = 'loading'
   try {
     const play = await fetchPlay(source.roomId, store.settings.video.defaultQn)
-    // 拉地址期间用户可能已经关闭「加入解说」或删除了房间
-    if (
-      !store.sources.some((x) => x.id === source.id) ||
-      !source.commentary ||
-      store.view !== 'live' ||
-      extraPlayers.has(source.id)
-    ) {
+    // 拉地址期间用户可能已经切换开关或删除了房间
+    if (!store.sources.some((x) => x.id === source.id)) return
+    if (!source.commentary && !source.video) {
+      source.mediaState = 'idle'
+      source.audioError = ''
+      return
+    }
+    if (store.view !== 'live' || extraPlayers.has(source.id)) return
+    const visible = source.video ? sourceVideoEls.get(source.id) || null : null
+    if (source.video && !visible) {
+      // 等可见 video 挂载后再建播放器，避免先建隐藏播放器又重建
+      source.mediaState = 'idle'
       return
     }
     const streams = streamsFromPlay(play)
     source.liveStatus = play.liveStatus || source.liveStatus
     if (!streams.flv.length && !streams.hls.length) {
+      source.mediaState = 'error'
       source.audioError =
         source.liveStatus === 1 || source.liveStatus === 2
-          ? '拿不到播放地址，无法加入解说'
-          : '当前未开播，无法加入解说'
+          ? '拿不到播放地址，无法播放这一路'
+          : '当前未开播，无法播放这一路'
       return
     }
-    const video = document.createElement('video')
-    video.playsInline = true
-    video.setAttribute('aria-hidden', 'true')
-    video.style.cssText =
-      'position:fixed;left:-4px;bottom:-4px;width:2px;height:2px;opacity:0.01;pointer-events:none;z-index:-1'
-    document.body.appendChild(video)
+
+    let video = visible
+    let mode: 'hidden' | 'visible' = 'visible'
+    if (!video) {
+      video = document.createElement('video')
+      video.playsInline = true
+      video.setAttribute('aria-hidden', 'true')
+      video.style.cssText =
+        'position:fixed;left:-4px;bottom:-4px;width:2px;height:2px;opacity:0.01;pointer-events:none;z-index:-1'
+      document.body.appendChild(video)
+      mode = 'hidden'
+    }
     const player = new StreamPlayer(
       video,
       streams,
@@ -1001,36 +1187,64 @@ async function ensureExtraPlayer(source: ExtraRoom) {
         if (state === 'playing') {
           source.blocked = false
           source.audioError = ''
+          source.mediaState = 'playing'
+        } else if (state === 'loading') {
+          source.mediaState = 'loading'
+        } else if (state === 'error') {
+          source.mediaState = 'error'
+          source.audioError = msg || '多路播放失败'
+        } else {
+          source.mediaState = 'idle'
         }
-        if (state === 'error') source.audioError = msg || '解说混音播放失败'
       },
       () => {
         source.blocked = true
       }
     )
-    player.setVolume(source.volume)
+    player.setVolume(sourceVolume(source))
     player.setSyncOffset(offsetFor('a'))
     player.start()
     if (!store.playing) player.pause()
-    extraPlayers.set(source.id, { video, player })
+    extraPlayers.set(source.id, { video, player, mode })
   } catch (e) {
-    source.audioError = e instanceof Error ? e.message : '解说混音播放失败'
+    source.mediaState = 'error'
+    source.audioError = e instanceof Error ? e.message : '多路播放失败'
   } finally {
     extraPlayerPending.delete(source.id)
   }
 }
 
+/** 多路墙把一个房间的可见 video 挂载 / 卸载时调用 */
+export function attachSourceVideo(sourceId: string, el: HTMLVideoElement | null) {
+  const old = sourceVideoEls.get(sourceId)
+  if (el) {
+    if (old === el) {
+      const existing = store.sources.find((s) => s.id === sourceId)
+      if (existing) syncSourcePlayer(existing)
+      return
+    }
+    sourceVideoEls.set(sourceId, el)
+  } else {
+    if (!old) return
+    sourceVideoEls.delete(sourceId)
+  }
+  const source = store.sources.find((s) => s.id === sourceId)
+  if (source) syncSourcePlayer(source)
+}
+
 function ensureAllExtraPlayers() {
   for (const source of store.sources) {
-    if (source.commentary) void ensureExtraPlayer(source)
+    if (source.commentary || source.video) syncSourcePlayer(source)
   }
 }
 
 export function retryDanmaku() {
-  danmaku.retry(store.account.mid || 0, getCookieValue('buvid3'))
+  const uid = store.account.mid || 0
   const buvid = getCookieValue('buvid3')
+  danmaku.retry(uid, buvid)
+  if (store.settings.danmaku.includeB) danmakuB.retry(uid, buvid)
   for (const source of store.sources) {
-    extraClients.get(source.id)?.retry(store.account.mid || 0, buvid)
+    extraClients.get(source.id)?.retry(uid, buvid)
   }
 }
 
@@ -1083,6 +1297,7 @@ export function swap() {
     applyVolumes()
     applyOffset()
     connectAllDanmaku()
+    ensureAllExtraPlayers()
     updateMediaSession()
     persistSlots()
     saveRoomProfileSoon()
@@ -1129,16 +1344,19 @@ export function setQuality(key: 'a' | 'b', qn: number) {
 
 export function exitSession() {
   danmaku.stop()
+  danmakuB.stop()
   destroyPlayers()
   for (const id of [...extraClients.keys()]) {
     extraClients.get(id)?.stop()
     extraClients.delete(id)
   }
   destroyAllExtraPlayers()
+  sourceVideoEls.clear()
   for (const source of store.sources) {
     source.status = 'idle'
     source.error = ''
     source.audioError = ''
+    source.mediaState = 'idle'
     source.blocked = false
   }
   slotStreams.a = { flv: [], hls: [] }
@@ -1151,6 +1369,8 @@ export function exitSession() {
   store.b.blocked = false
   store.danmakuStatus = 'idle'
   store.danmakuError = ''
+  store.bDanmakuStatus = 'idle'
+  store.bDanmakuError = ''
   feedBuffer.length = 0
   releaseWakeLock()
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = null
@@ -1189,6 +1409,15 @@ export function togglePlay() {
 
 export function toggleDanmaku() {
   store.settings.danmaku.enabled = !store.settings.danmaku.enabled
+}
+
+/** A+B 两路弹幕同屏 */
+export function toggleIncludeBDanmaku() {
+  store.settings.danmaku.includeB = !store.settings.danmaku.includeB
+}
+
+export function setIncludeBDanmaku(on: boolean) {
+  store.settings.danmaku.includeB = on
 }
 
 /* ---------- 混音 ---------- */
@@ -1268,10 +1497,12 @@ export async function addSource(input: string): Promise<ExtraRoom | null> {
       badgeText: '',
       color: roomColor(init.roomId),
       commentary: false,
+      video: false,
       volume: 0.6,
       status: 'idle',
       error: '',
       audioError: '',
+      mediaState: 'idle',
       blocked: false,
     }
     store.sources.push(source)
@@ -1287,7 +1518,10 @@ export async function addSource(input: string): Promise<ExtraRoom | null> {
 }
 
 export type SourcePatch = Partial<
-  Pick<ExtraRoom, 'badgeMode' | 'badgeText' | 'color' | 'commentary' | 'volume'>
+  Pick<
+    ExtraRoom,
+    'badgeMode' | 'badgeText' | 'color' | 'commentary' | 'video' | 'volume'
+  >
 >
 
 export function updateSource(id: string, patch: SourcePatch) {
@@ -1297,20 +1531,15 @@ export function updateSource(id: string, patch: SourcePatch) {
   if (patch.badgeText !== undefined) source.badgeText = normalizeBadgeText(patch.badgeText)
   if (patch.color) source.color = patch.color
   if (typeof patch.commentary === 'boolean') source.commentary = patch.commentary
+  if (typeof patch.video === 'boolean') source.video = patch.video
   if (patch.volume !== undefined) source.volume = Math.max(0, Math.min(1, patch.volume))
   persistSources()
 
   if (typeof patch.volume === 'number') {
-    extraPlayers.get(id)?.player.setVolume(source.volume)
+    extraPlayers.get(id)?.player.setVolume(sourceVolume(source))
   }
-  if (typeof patch.commentary === 'boolean') {
-    if (source.commentary) {
-      void ensureExtraPlayer(source)
-    } else {
-      destroyExtraPlayer(id)
-      source.blocked = false
-      source.audioError = ''
-    }
+  if (typeof patch.commentary === 'boolean' || typeof patch.video === 'boolean') {
+    syncSourcePlayer(source)
   }
 }
 
@@ -1330,8 +1559,8 @@ export function retrySource(id: string) {
   const client = extraClients.get(id)
   if (client) client.retry(store.account.mid || 0, buvid)
   else if (store.view === 'live') connectSource(source)
-  if (source.commentary) {
-    // 混音播放器出错 / 被浏览器拦下时，手动重试要重建一次；
+  if (source.commentary || source.video) {
+    // 多路播放器出错 / 被浏览器拦下时，手动重试要重建一次；
     // 正常播放中的连接不打断。
     if (extraPlayers.has(id) && (source.audioError || source.blocked)) {
       destroyExtraPlayer(id)
@@ -1339,13 +1568,15 @@ export function retrySource(id: string) {
     if (!extraPlayers.has(id) && !extraPlayerPending.has(id)) {
       source.audioError = ''
       source.blocked = false
-      void ensureExtraPlayer(source)
+      source.mediaState = 'idle'
+      syncSourcePlayer(source)
     }
   }
 }
 
 export function roomIdForSource(sourceId?: string): number {
   if (!sourceId || sourceId === 'a') return store.a.roomId
+  if (sourceId === 'b') return store.b.roomId
   // 来源被移除后返回 0，调用方应提示用户，而不是误发到主房间
   return store.sources.find((s) => s.id === sourceId)?.roomId || 0
 }
@@ -1648,11 +1879,15 @@ export function debugSnapshot() {
     players: { a: !!playerA, b: !!playerB },
     messages: store.messages.length,
     danmaku: store.danmakuStatus,
+    bDanmaku: store.bDanmakuStatus,
+    includeB: store.settings.danmaku.includeB,
     sources: store.sources.map((s) => ({
       roomId: s.roomId,
       status: s.status,
       commentary: s.commentary,
-      audio: extraPlayers.has(s.id),
+      video: s.video,
+      media: sourceVideoEls.has(s.id) ? 'visible' : extraPlayers.get(s.id)?.mode || 'none',
+      mediaState: s.mediaState,
       audioError: s.audioError,
     })),
     playing: store.playing,

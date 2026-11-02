@@ -7,7 +7,9 @@ import {
   plusOne,
   replyInputLimit,
   send,
+  shouldShowSourceBadges,
   store,
+  toggleIncludeBDanmaku,
 } from '../lib/store'
 import type { ChatMsg } from '../lib/danmaku'
 import AppIcon from './AppIcon.vue'
@@ -30,7 +32,10 @@ const LIMIT = 20
 
 const statusLabel = computed(() => {
   const s = store.danmakuStatus
-  const extra = store.sources.length ? ` · +${store.sources.length}路` : ''
+  const extras: string[] = []
+  if (store.sources.length) extras.push(`+${store.sources.length}路`)
+  if (store.settings.danmaku.includeB && store.b.roomId) extras.push('A+B')
+  const extra = extras.length ? ` · ${extras.join(' · ')}` : ''
   if (s === 'open') return (store.viewer > 0 ? `${formatViewer(store.viewer)}人气` : '已连接') + extra
   if (s === 'reconnecting') return '弹幕重连中…' + extra
   if (s === 'connecting') return '弹幕连接中…' + extra
@@ -38,7 +43,7 @@ const statusLabel = computed(() => {
   return '弹幕未连接' + extra
 })
 
-const showSourceBadges = computed(() => store.sources.length > 0)
+const showSourceBadges = computed(() => shouldShowSourceBadges())
 
 const sendRoomLabel = computed(() => {
   const id = replyTarget.value?.sourceId
@@ -240,6 +245,19 @@ defineExpose({ focus: () => focusInput.value?.focus() })
           {{ statusLabel }}
         </small>
       </div>
+      <button
+        class="ab-btn"
+        :class="{ on: store.settings.danmaku.includeB }"
+        :title="
+          store.settings.danmaku.includeB
+            ? '只显示 A 路弹幕'
+            : '同时显示 A / B 两路弹幕'
+        "
+        :aria-pressed="store.settings.danmaku.includeB"
+        @click="toggleIncludeBDanmaku"
+      >
+        A+B
+      </button>
       <button class="import-btn" title="导入更多直播间的弹幕 / 解说" @click="emit('import')">
         <AppIcon name="plus" :size="16" />
       </button>
@@ -530,6 +548,26 @@ defineExpose({ focus: () => focusInput.value?.focus() })
 .import-btn {
   color: var(--accent-strong);
   background: var(--accent-soft);
+  border-color: transparent;
+}
+
+.ab-btn {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+
+.ab-btn.on {
+  color: #fff;
+  background: #6679cf;
   border-color: transparent;
 }
 

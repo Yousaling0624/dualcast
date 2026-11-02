@@ -22,6 +22,8 @@ export const SOURCE_PALETTE = [
 ] as const
 
 export const PRIMARY_SOURCE_COLOR = '#d97757'
+/** A/B 两路同屏时，B 路弹幕用蓝色气泡区分 */
+export const SECONDARY_SOURCE_COLOR = '#6679cf'
 
 export interface BadgeOptions {
   uname?: string
@@ -75,4 +77,16 @@ export function badgeForSource(mode: BadgeMode, opts: BadgeOptions = {}): Source
 /** 给设置页预览用：气泡上显示的字 */
 export function badgePreviewText(mode: BadgeMode, opts: BadgeOptions = {}): string {
   return badgeForSource(mode, opts).text || '●'
+}
+
+/**
+ * 是否需要在弹幕 / SC 上画来源气泡。
+ * 只有 A 一路时保持干净；有导入房间，或 A+B 同屏且 B 是另一个房间时才显示。
+ */
+export function needsSourceBadges(
+  sourceCount: number,
+  includeB: boolean,
+  hasDistinctBRoom: boolean
+): boolean {
+  return sourceCount > 0 || (includeB && hasDistinctBRoom)
 }

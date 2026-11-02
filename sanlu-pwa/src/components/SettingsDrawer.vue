@@ -258,11 +258,20 @@ async function importSource() {
 function sourceStatus(s: ExtraRoom): string {
   if (s.audioError) return s.audioError
   if (s.error && s.status === 'idle') return s.error
-  if (s.status === 'open') return s.commentary ? '弹幕已连接 · 混音中' : '弹幕已连接'
+  const media: string[] = []
+  if (s.commentary) media.push('声音')
+  if (s.video) media.push('画面')
+  if (s.status === 'open') {
+    if (!media.length) return '弹幕已连接'
+    const mediaText = `${media.join(' + ')}${s.mediaState === 'playing' ? '' : '准备中'}`
+    return `弹幕已连接 · ${mediaText}`
+  }
   if (s.status === 'connecting') return '连接中…'
   if (s.status === 'reconnecting') return '重连中…'
   if (s.status === 'failed') return s.error || '连接失败'
-  if (s.commentary) return '混音准备中…'
+  if (media.length) {
+    return s.mediaState === 'loading' ? `${media.join(' + ')}准备中…` : `${media.join(' + ')}待播放`
+  }
   return s.liveStatus === 1 ? '直播中 · 弹幕未连接' : '弹幕未连接'
 }
 
@@ -289,6 +298,10 @@ function setSourceCustom(s: ExtraRoom, e: Event) {
 
 function setSourceCommentary(s: ExtraRoom, e: Event) {
   updateSource(s.id, { commentary: (e.target as HTMLInputElement).checked })
+}
+
+function setSourceVideo(s: ExtraRoom, e: Event) {
+  updateSource(s.id, { video: (e.target as HTMLInputElement).checked })
 }
 
 function setSourceVolume(s: ExtraRoom, e: Event) {
@@ -447,6 +460,16 @@ defineOptions({ name: 'SettingsDrawer' })
                   </span>
                 </label>
                 <label class="row">
+                  <span class="row-text">
+                    <strong>同时看 A+B 弹幕</strong>
+                    <small>把比赛画面（B 路）的弹幕也合进同一屏，用蓝色气泡区分</small>
+                  </span>
+                  <span class="switch">
+                    <input v-model="store.settings.danmaku.includeB" type="checkbox" />
+                    <span class="track"></span><span class="thumb"></span>
+                  </span>
+                </label>
+                <label class="row">
                   <span class="row-text"><strong>显示昵称</strong><small>在弹幕前加上发送者</small></span>
                   <span class="switch">
                     <input v-model="store.settings.danmaku.showName" type="checkbox" />
@@ -541,10 +564,10 @@ defineOptions({ name: 'SettingsDrawer' })
               <div class="group">
                 <div class="group-head">
                   <div>
-                    <h3>多路弹幕 / 解说</h3>
+                    <h3>多路弹幕 / 声音 / 画面</h3>
                     <p>
-                      导入其他直播间后，弹幕会带上彩色气泡；打开「加入解说」会把这一路的声音混进来，
-                      比赛画面仍然只保留 B 路。
+                      导入其他直播间后，弹幕会带上彩色气泡。可以单独开声音，也可以把画面放进
+                      左下角的多路墙；比赛主画面仍然保留 B 路。
                     </p>
                   </div>
                   <AppIcon name="plus" :size="19" class="group-icon accent" />
@@ -625,8 +648,8 @@ defineOptions({ name: 'SettingsDrawer' })
 
                   <label class="row source-commentary">
                     <span class="row-text">
-                      <strong>加入解说混音</strong>
-                      <small>只混入声音，不占用比赛画面</small>
+                      <strong>加入多路声音</strong>
+                      <small>和 A 解说一起混音，可独立调音量</small>
                     </span>
                     <span class="switch">
                       <input
@@ -652,6 +675,21 @@ defineOptions({ name: 'SettingsDrawer' })
                     />
                     <em class="source-pct">{{ Math.round(s.volume * 100) }}%</em>
                   </div>
+
+                  <label class="row source-commentary">
+                    <span class="row-text">
+                      <strong>加入多路画面</strong>
+                      <small>在画面左下角的多路墙里显示这一路直播</small>
+                    </span>
+                    <span class="switch">
+                      <input
+                        type="checkbox"
+                        :checked="s.video"
+                        @change="setSourceVideo(s, $event)"
+                      />
+                      <span class="track"></span><span class="thumb"></span>
+                    </span>
+                  </label>
                 </div>
 
                 <p v-if="!store.sources.length" class="dim small">
@@ -994,7 +1032,7 @@ defineOptions({ name: 'SettingsDrawer' })
                 <div class="about-logo">叠</div>
                 <div>
                   <h3>叠播 DualCast</h3>
-                  <p>v1.6 · PWA 网页版</p>
+                  <p>v1.7 · PWA 网页版</p>
                 </div>
               </div>
               <p class="dim">

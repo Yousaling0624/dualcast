@@ -39,6 +39,7 @@ import DanmakuCanvas from './DanmakuCanvas.vue'
 import ChatPanel from './ChatPanel.vue'
 import SettingsDrawer from './SettingsDrawer.vue'
 import AppIcon from './AppIcon.vue'
+import MultiWall from './MultiWall.vue'
 import SuperChatOverlay from './SuperChatOverlay.vue'
 
 const zoneEl = ref<HTMLElement | null>(null)
@@ -59,11 +60,18 @@ let collapsedBeforeFullscreen = false
 /* A 解说小窗 */
 const miniOn = ref(store.commentaryOn)
 const miniExpanded = ref(false)
+/** 点一下画面隐藏小窗按钮，像 B 站移动端一样只留干净画面 */
+const miniImmersive = ref(false)
+const miniImmHint = ref(false)
 const miniPos = ref({ x: 16, y: 70 })
 const miniW = ref(300)
 const miniZoom = ref(1)
 const miniPan = ref({ x: 0, y: 0 })
 const miniH = computed(() => (miniW.value * 9) / 16)
+let miniTapTimer: number | null = null
+let miniHintTimer: number | null = null
+let miniTapCandidate = false
+let miniTapStart = { x: 0, y: 0 }
 
 /* 小窗框选裁切 */
 const miniCrop = ref<CropRect | null>(null)
@@ -146,11 +154,14 @@ const videoFit = computed(() => {
 const statusLabel = computed(() => {
   const s = store.danmakuStatus
   const extra = store.sources.length ? ` + ${store.sources.length} 路` : ''
-  if (s === 'open') return viewerLabel() ? `A 弹幕 · ${viewerLabel()}${extra}` : `A 弹幕已连接${extra}`
-  if (s === 'reconnecting') return `A 弹幕重连中…${extra}`
-  if (s === 'connecting') return `A 弹幕连接中…${extra}`
-  if (s === 'failed') return `A 弹幕连接失败${extra}`
-  return `A 弹幕未连接${extra}`
+  const ab = store.settings.danmaku.includeB && store.b.roomId ? ' · A+B' : ''
+  if (s === 'open') {
+    return viewerLabel() ? `A 弹幕 · ${viewerLabel()}${extra}${ab}` : `A 弹幕已连接${extra}${ab}`
+  }
+  if (s === 'reconnecting') return `A 弹幕重连中…${extra}${ab}`
+  if (s === 'connecting') return `A 弹幕连接中…${extra}${ab}`
+  if (s === 'failed') return `A 弹幕连接失败${extra}${ab}`
+  return `A 弹幕未连接${extra}${ab}`
 })
 
 const quickLimit = computed(() => (quickTarget.value ? replyInputLimit(quickTarget.value) : 20))
@@ -158,7 +169,14 @@ const quickPreview = computed(() =>
   quickTarget.value && quickText.value.trim() ? buildReply(quickText.value, quickTarget.value) : ''
 )
 
-const firstError = computed(() => store.startError || store.a.error || store.b.error || store.danmakuError)
+const firstError = computed(
+  () =>
+    store.startError ||
+    store.a.error ||
+    store.b.error ||
+    store.danmakuError ||
+    (store.settings.danmaku.includeB ? store.bDanmakuError : '')
+)
 
 function reveal() {
   controls.value = true
@@ -172,7 +190,11 @@ function reveal() {
 
 function onZoneTap(e: PointerEvent) {
   const t = e.target as HTMLElement
-  if (t.closest('button, .mini, .quality, .quickbar, input, .topbar, .bottombar, .crop-layer, .crop-actions'))
+  if (
+    t.closest(
+      'button, .mini, .quality, .quickbar, .multi-wall, input, .topbar, .bottombar, .crop-layer, .crop-actions'
+    )
+  )
     return
   const el = zoneEl.value
   if (el && dmCanvas.value) {
@@ -235,7 +257,7 @@ function onZoneMove(e: PointerEvent) {
     cancelHoverClose()
     return
   }
-  if (t.closest('.topbar, .bottombar, .mini, .quality, button, input')) return
+  if (t.closest('.topbar, .bottombar, .mini, .multi-wall, .quality, button, input')) return
   if (quickTarget.value) {
     const hit = dmCanvas.value?.rectFor(quickTarget.value.seq) || null
     if (pointerInRect(e, hit)) cancelHoverClose()
@@ -327,16 +349,55 @@ function chooseQuality(qn: number) {
   reveal()
 }
 
+function clearMiniTap() {
+  if (miniTapTimer) {
+    clearTimeout(miniTapTimer)
+    miniTapTimer = null
+  }
+  miniTapCandidate = false
+}
+
+function exitMiniImmersive() {
+  miniImmersive.value = false
+  miniImmHint.value = false
+  if (miniHintTimer) {
+    clearTimeout(miniHintTimer)
+    miniHintTimer = null
+  }
+}
+
+function scheduleMiniTap() {
+  if (miniTapTimer) clearTimeout(miniTapTimer)
+  miniTapTimer = window.setTimeout(() => {
+    miniTapTimer = null
+    miniImmersive.value = !miniImmersive.value
+    if (miniImmersive.value) {
+      miniImmHint.value = true
+      if (miniHintTimer) clearTimeout(miniHintTimer)
+      miniHintTimer = window.setTimeout(() => {
+        miniHintTimer = null
+        miniImmHint.value = false
+      }, 1900)
+    } else {
+      reveal()
+    }
+  }, 240)
+}
+
 function toggleMini(on?: boolean) {
   const next = on ?? !miniOn.value
   miniOn.value = next
   setCommentary(next)
-  if (!next) miniExpanded.value = false
+  if (!next) {
+    miniExpanded.value = false
+    exitMiniImmersive()
+  }
   reveal()
 }
 
 function toggleMiniExpand() {
   miniExpanded.value = !miniExpanded.value
+  exitMiniImmersive()
   if (!miniExpanded.value) {
     miniZoom.value = 1
     miniPan.value = { x: 0, y: 0 }
@@ -357,7 +418,12 @@ function clampMiniPos() {
 }
 
 function onMiniPointerDown(e: PointerEvent) {
-  if (miniExpanded.value) return
+  miniTapCandidate = !cropMode.value
+  miniTapStart = { x: e.clientX, y: e.clientY }
+  if (miniExpanded.value) {
+    reveal()
+    return
+  }
   const target = e.currentTarget as HTMLElement
   target.setPointerCapture(e.pointerId)
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
@@ -366,6 +432,7 @@ function onMiniPointerDown(e: PointerEvent) {
     pinchDist = Math.hypot(a.x - b.x, a.y - b.y) || 1
     pinchZoom = miniZoom.value
     dragging = false
+    miniTapCandidate = false
   } else if (pointers.size === 1) {
     dragging = true
     dragStart = {
@@ -381,6 +448,12 @@ function onMiniPointerDown(e: PointerEvent) {
 }
 
 function onMiniPointerMove(e: PointerEvent) {
+  if (
+    miniTapCandidate &&
+    Math.hypot(e.clientX - miniTapStart.x, e.clientY - miniTapStart.y) > 10
+  ) {
+    miniTapCandidate = false
+  }
   if (miniExpanded.value || resizing) return
   if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
   if (pointers.size === 2) {
@@ -408,6 +481,7 @@ function onMiniPointerMove(e: PointerEvent) {
 }
 
 function onMiniPointerUp(e: PointerEvent) {
+  const wasTap = miniTapCandidate && pointers.size <= 1 && !resizing
   pointers.delete(e.pointerId)
   if (pointers.size === 0) dragging = false
   else if (pointers.size === 1) {
@@ -421,9 +495,12 @@ function onMiniPointerUp(e: PointerEvent) {
       wy: miniPos.value.y,
     }
   }
+  if (wasTap && pointers.size === 0) scheduleMiniTap()
+  miniTapCandidate = false
 }
 
 function onMiniDoubleClick() {
+  clearMiniTap()
   if (miniExpanded.value) return
   miniZoom.value = miniZoom.value > 1 ? 1 : 2
   miniPan.value = { x: 0, y: 0 }
@@ -470,6 +547,7 @@ function onResizeUp() {
 function toggleCropMode() {
   cropMode.value = !cropMode.value
   if (cropMode.value) {
+    exitMiniImmersive()
     cropDraft.value = miniCrop.value ? { ...miniCrop.value } : { x: 0, y: 0, w: 1, h: 1 }
   } else {
     cropDraft.value = null
@@ -671,6 +749,7 @@ function onKey(e: KeyboardEvent) {
     toggleSc()
   } else if (e.key === 'Escape') {
     if (cropMode.value) cancelCrop()
+    else if (miniImmersive.value) exitMiniImmersive()
     else if (quickTarget.value) closeQuick()
     else if (isFullscreen.value) void toggleFullscreen()
   }
@@ -688,7 +767,10 @@ watch(
   () => store.commentaryOn,
   (v) => {
     miniOn.value = v
-    if (!v) miniExpanded.value = false
+    if (!v) {
+      miniExpanded.value = false
+      exitMiniImmersive()
+    }
   }
 )
 
@@ -727,6 +809,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
   window.removeEventListener('resize', onWindowResize)
   if (hideTimer) clearTimeout(hideTimer)
+  clearMiniTap()
+  exitMiniImmersive()
   cancelHoverClose()
   clearHoverOpen()
 })
@@ -746,6 +830,8 @@ onBeforeUnmount(() => {
       <DanmakuCanvas ref="dmCanvas" />
 
       <SuperChatOverlay />
+
+      <MultiWall />
 
       <!-- 浏览器拦截自动播放时，用一次点击解锁声音 -->
       <button
@@ -840,7 +926,7 @@ onBeforeUnmount(() => {
           <button
             class="dock-btn"
             :class="{ on: store.sources.length > 0 }"
-            title="导入更多直播间的弹幕 / 解说"
+            title="导入更多直播间的弹幕 / 声音 / 画面"
             @click="openSettings('danmaku')"
           >
             <AppIcon name="plus" :size="17" />
@@ -875,7 +961,12 @@ onBeforeUnmount(() => {
       <!-- A 解说小窗 -->
       <div
         class="mini"
-        :class="{ expanded: miniExpanded, hidden: !miniOn, cropping: cropMode }"
+        :class="{
+          expanded: miniExpanded,
+          hidden: !miniOn,
+          cropping: cropMode,
+          immersive: miniImmersive,
+        }"
         :style="
           miniExpanded
             ? undefined
@@ -917,6 +1008,12 @@ onBeforeUnmount(() => {
           ></div>
           <span class="crop-tip">拖动框选要放大的画面区域</span>
         </div>
+
+        <Transition name="fade">
+          <span v-if="miniImmersive && miniImmHint" class="mini-imm-hint">
+            点击画面显示按钮
+          </span>
+        </Transition>
 
         <div class="mini-top">
           <span class="mini-tag"><i></i>A · 解说{{ miniCrop ? ' · 已裁切' : '' }}</span>
@@ -1570,6 +1667,49 @@ onBeforeUnmount(() => {
   opacity: 0;
   pointer-events: none;
   transform: translateX(200vw);
+}
+
+/* 点一下画面：隐藏小窗自己的按钮，只留干净画面 */
+.mini.immersive {
+  cursor: pointer;
+  border-color: transparent;
+  box-shadow: none;
+}
+
+.mini.immersive .mini-top {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mini.immersive .mini-resize {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.mini.immersive .mini-imm-hint {
+  opacity: 1;
+}
+
+.mini-imm-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  z-index: 5;
+  transform: translateX(-50%);
+  padding: 5px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.58);
+  color: rgba(255, 248, 239, 0.84);
+  font-size: 9.5px;
+  white-space: nowrap;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+.mini-top {
+  transition: opacity 0.18s ease;
 }
 
 .mini-top {

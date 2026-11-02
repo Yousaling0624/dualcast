@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   PRIMARY_SOURCE_COLOR,
+  SECONDARY_SOURCE_COLOR,
   SOURCE_PALETTE,
   badgeForSource,
   badgePreviewText,
   firstGlyph,
+  needsSourceBadges,
   normalizeBadgeText,
   paletteIndex,
   roomColor,
@@ -99,5 +101,30 @@ describe('badgePreviewText', () => {
   it('其他模式直接显示气泡文字', () => {
     expect(badgePreviewText('initial', { uname: '解说' })).toBe('解')
     expect(badgePreviewText('custom', { custom: 'A' })).toBe('A')
+  })
+})
+
+describe('needsSourceBadges', () => {
+  it('只有 A 一路时不显示气泡', () => {
+    expect(needsSourceBadges(0, false, true)).toBe(false)
+  })
+
+  it('有导入房间时显示气泡', () => {
+    expect(needsSourceBadges(2, false, false)).toBe(true)
+  })
+
+  it('A+B 同屏且 B 是另一个房间时显示气泡', () => {
+    expect(needsSourceBadges(0, true, true)).toBe(true)
+  })
+
+  it('B 和 A 是同一个房间时不显示气泡', () => {
+    expect(needsSourceBadges(0, true, false)).toBe(false)
+  })
+})
+
+describe('A/B 同屏配色', () => {
+  it('B 路使用和 A 路不同的固定颜色', () => {
+    expect(SECONDARY_SOURCE_COLOR).not.toBe(PRIMARY_SOURCE_COLOR)
+    expect(SOURCE_PALETTE).toContain(SECONDARY_SOURCE_COLOR)
   })
 })
