@@ -471,9 +471,11 @@ function onMiniPointerDown(e: PointerEvent) {
 }
 
 function onMiniPointerMove(e: PointerEvent) {
+  // 手指点按难免有几像素抖动，触屏放宽一些，避免点一下被当成拖动
+  const slop = e.pointerType === 'mouse' ? 8 : 16
   if (
     miniTapCandidate &&
-    Math.hypot(e.clientX - miniTapStart.x, e.clientY - miniTapStart.y) > 10
+    Math.hypot(e.clientX - miniTapStart.x, e.clientY - miniTapStart.y) > slop
   ) {
     miniTapCandidate = false
   }
