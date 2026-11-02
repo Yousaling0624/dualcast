@@ -1,11 +1,13 @@
 /**
- * 双路直播播放器。mpei-ts.js(flv) 优先 —— 延迟低；不支持 MSE 或 flv 全挂时
+ * 双路直播播放器。mpegts.js(flv) 优先 —— 延迟低；不支持 MSE 或 flv 全挂时
  * 回退 hls.js，再回退原生 HLS（iOS）。
- * 流量原则：浏览器直连 B 站 CDN（配合页面 referrer=no-referrer），
- * 同域 /stream 代理仅作直连全部失败后的兜底。
+ *
+ * 流量原则：浏览器优先直连 B 站 CDN（页面 referrer=no-referrer）；
+ * 直连失败再走中转的 /stream 兜底。
  */
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
+import { getRelayBase } from './net'
 
 export interface StreamSet {
   flv: string[]
@@ -15,7 +17,10 @@ export interface StreamSet {
 export type PlayState = 'loading' | 'playing' | 'error' | 'stopped'
 
 export function proxyUrl(u: string): string {
-  return '/stream/' + encodeURIComponent(u)
+  const relay = getRelayBase()
+  const base = relay || ''
+  // 同域 /stream 只在 Cloudflare Pages 部署时存在；GH Pages 下由中转提供
+  return `${base}/stream/${encodeURIComponent(u)}`
 }
 
 export function supportsFlv(): boolean {
@@ -26,29 +31,60 @@ export function supportsFlv(): boolean {
   }
 }
 
+function isBuffered(v: HTMLVideoElement, t: number): boolean {
+  try {
+    for (let i = 0; i < v.buffered.length; i++) {
+      if (t >= v.buffered.start(i) && t <= v.buffered.end(i)) return true
+    }
+  } catch {
+    /* ignore */
+  }
+  return false
+}
+
 export class StreamPlayer {
   private video: HTMLVideoElement
   private urls: StreamSet
   private onState: (s: PlayState, msg?: string) => void
+  private onBlocked: () => void
   private engine: mpegts.Player | Hls | null = null
   private mode: 'mpegts' | 'hls' | 'native' | null = null
   private candidates: { mode: 'mpegts' | 'hls' | 'native'; url: string }[] = []
   private idx = 0
   private keepTimer: number | null = null
   private state: PlayState = 'stopped'
-  // 先静音起播绕过自动播放限制，attach 后由 store 按音量设置解除
   private muted = true
+  private nativeErr: (() => void) | null = null
+  /** 正值表示这一路应该比另一路晚（单位 ms），由 store 的混音面板调节 */
+  private syncOffset = 0
 
-  constructor(video: HTMLVideoElement, urls: StreamSet, onState: (s: PlayState, msg?: string) => void) {
+  constructor(
+    video: HTMLVideoElement,
+    urls: StreamSet,
+    onState: (s: PlayState, msg?: string) => void,
+    onBlocked: () => void = () => {}
+  ) {
     this.video = video
     this.urls = urls
     this.onState = onState
+    this.onBlocked = onBlocked
+    this.video.addEventListener('playing', this.onPlaying)
     this.buildCandidates()
+  }
+
+  /** 浏览器可能拦截带声音的自动播放；由 store 弹出「点此播放」 */
+  private tryPlay() {
+    this.video.play().catch((e: unknown) => {
+      if ((e as DOMException)?.name === 'NotAllowedError') this.onBlocked()
+    })
+  }
+
+  private onPlaying = () => {
+    if (this.state !== 'stopped') this.setState('playing')
   }
 
   private buildCandidates() {
     const list: { mode: 'mpegts' | 'hls' | 'native'; url: string }[] = []
-    // 先放全部直连线路，再放代理兜底 —— 正常情况下流量不经过 Cloudflare
     const push = (via: 'direct' | 'proxy') => {
       const wrap = (u: string) => (via === 'direct' ? u : proxyUrl(u))
       if (supportsFlv()) {
@@ -57,23 +93,24 @@ export class StreamPlayer {
       if (Hls.isSupported()) {
         for (const u of this.urls.hls) list.push({ mode: 'hls', url: wrap(u) })
       }
+      // iOS Safari 原生 HLS：video.src 直接喂 m3u8，跨域不需要 CORS
       for (const u of this.urls.hls) list.push({ mode: 'native', url: wrap(u) })
     }
     push('direct')
+    // 中转作为最后兜底；没有中转时也保留同域 /stream（Cloudflare 部署可用）
     push('proxy')
-    this.candidates = list
+    this.candidates = list.filter((c) => c.url)
   }
 
   start() {
     if (!this.candidates.length) {
-      this.setState('error', '没有可用的播放地址')
+      this.setState('error', '当前浏览器不支持这个直播流（缺少 H.264/MSE），换个浏览器试试')
       return
     }
     this.idx = 0
     this.playCurrent()
   }
 
-  /** 网络抖动 / 断流后从头再试一轮 */
   restart() {
     this.destroyEngine()
     this.idx = 0
@@ -101,18 +138,15 @@ export class StreamPlayer {
         return
       }
       const player = mpegts.createPlayer(
-        {
-          type: 'flv',
-          isLive: true,
-          url,
-          cors: true,
-        },
+        { type: 'flv', isLive: true, url, cors: true },
         {
           enableStashBuffer: false,
           liveBufferLatencyChasing: true,
           lazyLoad: false,
           autoCleanupSourceBuffer: true,
-        }
+          reconnectTries: 2,
+          reconnectInterval: 1000,
+        } as mpegts.Config
       )
       player.attachMediaElement(this.video)
       player.on(mpegts.Events.ERROR, () => {
@@ -123,14 +157,15 @@ export class StreamPlayer {
       this.engine = player
       this.mode = 'mpegts'
       this.video.muted = this.muted
-      this.video.play().catch(() => {})
+      this.tryPlay()
       this.startKeepalive()
     } else if (cand.mode === 'hls') {
       const hls = new Hls({
         liveDurationInfinity: true,
         lowLatencyMode: false,
-        maxBufferLength: 10,
+        maxBufferLength: 12,
         manifestLoadingTimeOut: 12_000,
+        fragLoadingTimeOut: 12_000,
       })
       hls.loadSource(url)
       hls.attachMedia(this.video)
@@ -141,30 +176,29 @@ export class StreamPlayer {
       this.engine = hls
       this.mode = 'hls'
       this.video.muted = this.muted
-      this.video.play().catch(() => {})
+      this.tryPlay()
       this.startKeepalive()
     } else {
-      // 原生 HLS（iOS Safari）
       this.mode = 'native'
       this.video.src = url
       this.video.muted = this.muted
-      this.video.play().catch(() => {})
+      this.tryPlay()
       this.startKeepalive()
-      // 原生播放错误只能靠 video 事件
+      // 原生播放错误只能靠 video 事件；监听只对本次地址生效
       const onErr = () => {
-        this.video.removeEventListener('error', onErr)
+        this.removeNativeErr()
         if (this.state !== 'stopped') this.next()
       }
+      this.nativeErr = onErr
       this.video.addEventListener('error', onErr)
     }
 
-    // 播放成功判定：1 秒内有时间推进就算 playing
+    // 1.2 秒内时间推进或开始播放，视为成功
     const t0 = this.video.currentTime
     window.setTimeout(() => {
       if (this.state === 'stopped') return
-      if (this.video.currentTime > t0 || !this.video.paused) {
-        if (!this.video.paused) this.setState('playing')
-      }
+      if (!this.video.paused) this.setState('playing')
+      else if (this.video.currentTime > t0) this.setState('playing')
     }, 1200)
   }
 
@@ -178,21 +212,33 @@ export class StreamPlayer {
     this.playCurrent()
   }
 
-  /** 直播延迟追帧：缓冲超过 6 秒就跳到最新 */
+  /**
+   * 直播追帧 + 手动音画偏移。
+   * - 常规：缓冲超过 6 秒就跳到最新；
+   * - 偏移：把 A 路的目标位置往后挪 offset 秒，让 A 的声音慢一点。
+   */
   private startKeepalive() {
     this.stopKeepalive()
     this.keepTimer = window.setInterval(() => {
       const v = this.video
       if (v.readyState < 2 || v.paused) return
       try {
-        const end = v.buffered.length ? v.buffered.end(v.buffered.length - 1) : 0
-        if (end - v.currentTime > 6) {
-          v.currentTime = end - 1.5
+        const n = v.buffered.length
+        if (!n) return
+        const end = v.buffered.end(n - 1)
+        const liveTarget = end - 1.5
+        if (this.syncOffset !== 0) {
+          const target = liveTarget - this.syncOffset / 1000
+          if (Math.abs(v.currentTime - target) > 0.35 && isBuffered(v, target)) {
+            v.currentTime = target
+          }
+        } else if (end - v.currentTime > 6) {
+          v.currentTime = liveTarget
         }
       } catch {
         /* noop */
       }
-    }, 5000)
+    }, 1000)
   }
 
   private stopKeepalive() {
@@ -202,17 +248,33 @@ export class StreamPlayer {
     }
   }
 
+  private removeNativeErr() {
+    if (this.nativeErr) {
+      this.video.removeEventListener('error', this.nativeErr)
+      this.nativeErr = null
+    }
+  }
+
   private destroyEngine() {
     this.stopKeepalive()
+    this.removeNativeErr()
     const e = this.engine
     this.engine = null
-    if (!e) return
+    if (!e) {
+      if (this.mode === 'native') {
+        this.video.removeAttribute('src')
+        this.video.load()
+      }
+      this.mode = null
+      return
+    }
     try {
       if (this.mode === 'mpegts') {
-        ;(e as mpegts.Player).pause()
-        ;(e as mpegts.Player).unload()
-        ;(e as mpegts.Player).detachMediaElement()
-        ;(e as mpegts.Player).destroy()
+        const p = e as mpegts.Player
+        p.pause()
+        p.unload()
+        p.detachMediaElement()
+        p.destroy()
       } else if (this.mode === 'hls') {
         ;(e as Hls).destroy()
       } else {
@@ -222,6 +284,7 @@ export class StreamPlayer {
     } catch {
       /* noop */
     }
+    this.mode = null
   }
 
   setMuted(m: boolean) {
@@ -229,11 +292,32 @@ export class StreamPlayer {
     this.video.muted = m
   }
 
+  setVolume(v: number) {
+    const vol = Math.max(0, Math.min(1, v))
+    // 记住静音状态：playCurrent 切线路时会重新套用 this.muted
+    this.muted = vol === 0
+    this.video.volume = vol
+    this.video.muted = this.muted
+  }
+
+  setSyncOffset(ms: number) {
+    this.syncOffset = Math.max(-5000, Math.min(5000, ms))
+  }
+
+  seekToLive() {
+    try {
+      const n = this.video.buffered.length
+      if (n) this.video.currentTime = this.video.buffered.end(n - 1) - 1.2
+    } catch {
+      /* noop */
+    }
+  }
+
   async play() {
     try {
       await this.video.play()
-    } catch {
-      /* 用户手势限制时静默失败，界面上再点 */
+    } catch (e) {
+      if ((e as DOMException)?.name === 'NotAllowedError') this.onBlocked()
     }
   }
 
@@ -243,6 +327,7 @@ export class StreamPlayer {
 
   destroy() {
     this.setState('stopped')
+    this.video.removeEventListener('playing', this.onPlaying)
     this.destroyEngine()
   }
 }

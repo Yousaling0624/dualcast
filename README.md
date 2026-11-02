@@ -1,38 +1,65 @@
 # 三叠播 / DualCast
 
-把两个 B 站直播间叠在一起看：一路出画面，一路出弹幕和声音。
+把两个 B 站直播间叠在一起看：**A 房出弹幕和声音，B 房出画面**。适合「主播能解说、但没有比赛画面版权」的场景 —— 主播开 A 房陪大家看球，B 房找一路比赛画面，再把 A 房的弹幕盖在 B 房上。
 
-| 子项目 | 说明 | 状态 |
+| 子项目 | 说明 | 地址 |
 |---|---|---|
-| [`sanlu-pwa/`](./sanlu-pwa/README.md) | **网页版 PWA**（PC / iOS / 鸿蒙浏览器，已上线） | ✅ 已部署 https://sanlu.yousaling.dpdns.org |
-| [`DualLive/`](./DualLive/README.md) | **Android 原生版**（Jetpack Compose，ExoPlayer） | ✅ 已构建 APK（最新 1.1.1，versionCode 13） |
+| [`sanlu-pwa/`](./sanlu-pwa/README.md) | **网页版 PWA**（PC / iOS / Android / 鸿蒙浏览器） | https://yousaling0624.github.io/dualcast/ |
+| [`DualLive/`](./DualLive/README.md) | **Android 原生版**（Jetpack Compose，ExoPlayer） | 本地构建 APK |
 
-## 网页版要点（交接必读）
+## 网页版功能
 
-线上跑在 Cloudflare Pages（项目 `sanlu`，自定义域 `sanlu.yousaling.dpdns.org`）。
+- 两个直播间叠加播放，A/B 一键互换
+- A 房弹幕 Canvas 渲染：字号 / 速度 / 透明度 / 显示区域 / 描边样式 / 屏蔽词
+- **斗鱼式互动**：点聊天室或画面上的弹幕即可 `+1`、`回复`；回复自动拼成 `内容@昵称:原话`（B 站 20 字限制内），带发送冷却、失败原因、自己弹幕回显去重
+- B 站扫码登录（也可手动粘贴 Cookie），发弹幕 / 收礼物 / SC / 舰长消息
+- 混音台：A/B 音量、只听一路、A 相对 B 的 ±5 秒音画偏移；按房间组合记忆
+- A 解说小窗：可拖动、缩放、全屏；画中画、全屏、方向锁、Media Session、屏幕常亮
+- 清晰度切换（A/B）、画面适应 / 铺满 / 拉伸
+- 我的组合、最近看过、房间预览（封面 / 主播 / 人气 / 分区 / 开播状态）
+- 可安装 PWA，离线打开应用外壳
 
-B 站风控是本项目最大的技术难点，三条实测结论：
+## 部署（GitHub Pages）
 
-1. **浏览器直连 B 站 API 不可行**：B 站按 Origin 白名单拒绝，非 `*.bilibili.com` 域名的请求在网关层直接 403（浏览器无法伪造 Origin，纯前端无解）。
-2. **Cloudflare 的 `fetch()` 出口被封**：返回 -412 `request was banned`，按 TLS/HTTP2 指纹识别，带完整 buvid cookie 也没用。
-3. **原始 TLS socket（`cloudflare:sockets`）手写 HTTP/1.1 可以通过**：同一出口 IP 直接 200 —— 这是当前代理能跑通的关键。
+推送到 `main` 后，[`.github/workflows/deploy-pages.yml`](./.github/workflows/deploy-pages.yml) 会自动构建 `sanlu-pwa/` 并发布到 GitHub Pages。首次使用时在仓库 **Settings → Pages → Build and deployment** 选择 **GitHub Actions** 即可。
 
-所以 `sanlu-pwa/functions/api/[[path]].ts` 是双通道：`fetch()` 失败（403/412/-352）自动切 raw socket 重试。
+构建时自动使用：
 
-**当前未完全解决**：`getDanmuInfo` 可能仍返回 -352（B 站对数据中心出口的弹幕 token 风控更严），前端已用默认 host + 空 token 裸连兜底。这是最值得继续攻的点。详见 [sanlu-pwa/README.md](./sanlu-pwa/README.md)。
+- `VITE_BASE=/<仓库名>/` —— 项目站点子路径
+- `VITE_RELAY_URL` —— 可在 **Settings → Secrets and variables → Actions → Variables** 覆盖中转地址，不设置则用默认 Cloudflare 中转
 
-## 部署
+手动构建：
 
 ```bash
 cd sanlu-pwa
-npm install && npm run build
-export CLOUDFLARE_API_TOKEN=xxx   # Pages 编辑 + 帐户设置读取 + 区域读取 + DNS 编辑
-bash deploy.sh                    # 一键：构建 → 部署 → 绑自定义域 → 配 DNS
+npm ci
+npm run typecheck
+VITE_BASE=/dualcast/ npm run build   # 输出 dist/
 ```
 
 Android 版：`cd DualLive && ./gradlew assembleDebug`（产出 `app/build/outputs/apk/debug/`）。
 
-## 环境信息
+## B 站接口为什么还需要中转
 
-- Cloudflare 账号里已有：Pages 项目 `sanlu`、zone `yousaling.dpdns.org` 与 `lovehgr.dpdns.org`
-- 未在仓库中保存任何 Token / 密钥，全部走环境变量
+纯静态网页**无法完全直连** B 站 REST API：B 站直播网关按 `Origin` 白名单校验，非 `*.bilibili.com` 的浏览器请求在网关层直接 403，而浏览器不允许脚本伪造 `Origin`。PiliPlus 这类原生 App 能自由设置 `Origin/Referer/Cookie`，所以可以直连；网页做不到。
+
+因此网页版采用 **直连优先 + 中转兜底**：
+
+| 能力 | 通道 |
+|---|---|
+| 弹幕 WebSocket | ✅ 浏览器直连（WebSocket 不受 CORS 限制） |
+| 直播 CDN 拉流 | ✅ 浏览器直连（页面 `referrer=no-referrer`，失败再走 `/stream` 中转） |
+| buvid 指纹 `finger/spi` | ✅ 尝试直连 |
+| 房间信息 / 播放地址 / 扫码登录 / 发弹幕 | 先直连；被 CORS/风控拦截自动走中转 |
+
+默认中转为项目已有的 Cloudflare Pages 服务 `https://sanlu.yousaling.dpdns.org`，也可在 **设置 → 中转** 里换成自建地址（CORS 允许 `*`）。中转代码在 [`sanlu-pwa/functions/`](./sanlu-pwa/functions/)，可直接部署到 Cloudflare Pages。
+
+## 仓库结构
+
+```
+sanlu-pwa/     Vue 3 + Vite PWA（网页版）
+DualLive/      Android 原生版
+.github/       GitHub Pages 自动部署工作流
+```
+
+详细技术说明见 [sanlu-pwa/README.md](./sanlu-pwa/README.md)。

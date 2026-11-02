@@ -1,18 +1,22 @@
 /* 叠播 PWA Service Worker：
  * - 应用外壳（页面 / 图标 / manifest）预缓存；
  * - 带哈希的静态资源运行时缓存；
- * - /api 与 /stream 代理请求一律直连，绝不缓存。
+ * - /api 与 /stream 请求一律直连，绝不缓存；
+ * - 所有路径相对 SW 作用域解析，兼容 GitHub Pages 的 /<repo>/ 子路径。
  */
-const CACHE = 'sanlu-shell-v2'
+const CACHE = 'sanlu-shell-v3'
+const SCOPE = new URL(self.registration.scope)
+const SCOPE_PATH = SCOPE.pathname
 const SHELL = [
-  '/',
-  '/index.html',
-  '/manifest.webmanifest',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png',
-  '/icons/maskable-512.png',
-  '/icons/apple-touch-icon.png',
+  './',
+  './index.html',
+  './manifest.webmanifest',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
+  './icons/maskable-512.png',
+  './icons/apple-touch-icon.png',
 ]
+const INDEX = new URL('./index.html', SCOPE).href
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
@@ -38,7 +42,12 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(req.url)
   if (url.origin !== self.location.origin) return
   // 代理接口与直播流：直连，不缓存
-  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/stream/')) return
+  if (
+    url.pathname.startsWith(`${SCOPE_PATH}api/`) ||
+    url.pathname.startsWith(`${SCOPE_PATH}stream/`)
+  ) {
+    return
+  }
 
   // 页面导航：网络优先，离线回落外壳
   if (req.mode === 'navigate') {
@@ -46,16 +55,16 @@ self.addEventListener('fetch', (event) => {
       fetch(req)
         .then((res) => {
           const copy = res.clone()
-          caches.open(CACHE).then((c) => c.put('/index.html', copy))
+          caches.open(CACHE).then((c) => c.put(INDEX, copy))
           return res
         })
-        .catch(() => caches.match('/index.html'))
+        .catch(() => caches.match(INDEX))
     )
     return
   }
 
   // 带哈希的构建产物：缓存优先
-  if (url.pathname.startsWith('/assets/')) {
+  if (url.pathname.startsWith(`${SCOPE_PATH}assets/`)) {
     event.respondWith(
       caches.match(req).then(
         (hit) =>

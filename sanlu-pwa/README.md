@@ -1,64 +1,122 @@
-# 三叠播 PWA（sanlu）
+# 三叠播 PWA
 
-把两个 B 站直播间叠在一起看的网页版：一路出画面，一路出弹幕和声音。适配 PC / iOS / 鸿蒙浏览器，可添加到主屏幕（PWA）。
+把两个 B 站直播间叠在一起看的网页版：**A 房出弹幕和声音，B 房出画面**。PC / iOS / Android / 鸿蒙浏览器可用，支持添加到主屏幕。
 
-- 线上地址：https://sanlu.yousaling.dpdns.org
-- 托管：Cloudflare Pages（项目名 `sanlu`），自定义域 `sanlu.yousaling.dpdns.org`，DNS CNAME 指向 `sanlu.pages.dev`
-- 技术栈：Vite + Vue 3 + TypeScript，mpegts.js（flv）/ hls.js，Canvas 弹幕，Cloudflare Pages Functions
+- GitHub Pages：https://yousaling0624.github.io/dualcast/
+- 备用 Cloudflare Pages：https://sanlu.yousaling.dpdns.org
+- 技术栈：Vite 6 + Vue 3 + TypeScript、mpegts.js / hls.js、Canvas 弹幕、WebSocket 弹幕、Cloudflare Pages Functions 中转
 
-## 目录结构
+## 功能
+
+### 播放
+- 双直播间叠加：B 路主画面 + A 路解说小窗（可拖动 / 缩放 / 全屏 / 关闭）
+- A / B 一键互换；FLV（mpegts.js）优先，HLS（hls.js / 原生）回退
+- 清晰度切换（A、B 独立）；画面适应 / 铺满 / 拉伸
+- 画中画、全屏 + 横屏锁定、Media Session、屏幕常亮
+- 浏览器拦截带声音自动播放时，显示「点此开始播放」解锁
+
+### 弹幕与互动
+- A 房弹幕 Canvas 渲染：字号、速度、透明度、显示区域、描边/阴影/纯色、昵称、屏蔽词
+- 点聊天室弹幕或画面上的浮动弹幕，弹出 `+1` / `回复` 快捷条
+- 回复格式 `回复内容@昵称:原话`，按 B 站 20 字上限自动截断引用
+- 发送冷却、错误码中文提示、本地先显示 + 服务端回显去重
+- 礼物 / SC / 舰长 / 开播下播系统消息
+- 进房补拉历史弹幕
+
+### 账号
+- B 站 App 扫码登录（轮询），或手动粘贴 Cookie
+- 登录后显示昵称 / 头像 / UID / 等级；退出登录
+- Cookie 只保存在本机 `localStorage`
+
+### 体验
+- 我的组合（A/B 房间对，一键开播）、最近看过、房间预览
+- 混音台：A/B 音量、只听一路、A 相对 B 的 ±5 秒音画偏移
+- 音量按「A 房间 + B 房间」组合记忆
+- 可安装 PWA；`sw.js` 缓存应用外壳，接口与直播流永不缓存
+
+## 目录
 
 ```
 src/
-  components/  HomeView / LiveView / ChatPanel / DanmakuCanvas / SettingsDrawer
+  components/
+    HomeView.vue        首页：房间输入 / 预览 / 组合 / 最近
+    LiveView.vue        播放页：双路视频、弹幕层、快捷互动、小窗、全屏
+    ChatPanel.vue       聊天室：+1 / 回复 / 发送
+    DanmakuCanvas.vue   Canvas 弹幕渲染与点击命中测试
+    SettingsDrawer.vue  账号 / 弹幕 / 混音 / 画面 / 中转 / 关于
   lib/
-    bili.ts      B 站 API（双通道：浏览器直连 → 同域代理）
-    danmaku.ts   弹幕 WebSocket 协议（op=7 认证 / op=2 心跳 / protover 3 brotli）
-    player.ts    双路播放器（mpegts.js flv 优先，hls.js 回退）
-    store.ts     全局状态与会话编排
+    net.ts     直连优先 + 中转兜底、Cookie、中转配置
+    wbi.ts     WBI 签名（w_rid / wts / mixinKey）
+    md5.ts     纯 JS MD5
+    bili.ts    房间、播放地址、弹幕 token、历史弹幕、发弹幕、扫码登录
+    danmaku.ts 弹幕 WebSocket（op 2/3/5/7/8，zlib / brotli）
+    player.ts  双路播放器与音画偏移
+    store.ts   全局状态、会话编排、聊天室互动
 functions/
-  api/[[path]].ts    API 反向代理（双通道：fetch + 原始 TLS socket）
-  stream/[[url]].ts  直播流代理（兜底用）
-  rawtest.ts         调试端点：验证 raw socket 对 B 站的可用性
-public/           manifest、sw.js、icons
-deno/proxy.ts    可选的 Deno Deploy 中转脚本（本仓库暂不需要）
+  api/[[path]].ts    API 中转（fetch + 原始 TLS socket 双通道）
+  stream/[[url]].ts  直播流兜底中转
+public/              manifest、sw.js、icons
 ```
 
-## 核心难点：B 站风控三重封锁与破解
+## 接口通道说明（重要）
 
-这三个结论都是实测得出的，改动前务必了解：
+B 站直播网关按 `Origin` 白名单拦截浏览器请求，非 `*.bilibili.com` 来源直接 403；浏览器脚本无法伪造 `Origin`。所以网页版**不可能像原生 App 一样纯前端直连全部 REST 接口**。
 
-| 通道 | 结果 |
-|---|---|
-| 浏览器直连 B 站 API | ❌ B 站按 **Origin 白名单**拒绝：Origin 非 `*.bilibili.com` 的请求在网关层直接 403（浏览器无法伪造 Origin，纯前端无解） |
-| Cloudflare `fetch()` 出口 | ❌ B 站按 **TLS/HTTP2 指纹**返回 -412 `request was banned`（带完整 buvid cookie 也无效，10 次全挂） |
-| 原始 TLS socket（`cloudflare:sockets`）手写 HTTP/1.1 | ✅ **同一出口 IP 直接 200** —— 指纹不同，风控放行 |
+当前策略：
 
-因此 `functions/api/[[path]].ts` 采用双通道：先 `fetch()`，被风控（403/412/-352）时自动改用 raw socket 重试；同一 isolate 内记住 fetch 已 ban，后续请求直接走 raw。
-`getDanmuInfo` 风控（-352）时还会去直播间页面抓 `w_webid` 再试一次（页面抓取同样走 raw 通道）。
+1. **GET 先直连** `api.live.bilibili.com` / `api.bilibili.com` / `passport.bilibili.com`；
+2. 遇到 CORS、超时、HTTP 403/412 或风控码（-352/-412 等）自动切到中转 `${relay}/api/<bucket>/<path>`；
+3. **POST（发弹幕、退出登录）只走中转**，因为需要 `Cookie` 头；
+4. 弹幕 WebSocket、直播 CDN 拉流、buvid 指纹尽量直连，不经过中转。
 
-## 当前状态（交接时请注意）
+默认中转：`https://sanlu.yousaling.dpdns.org`（Cloudflare Pages Functions，CORS `*`）。构建时可用 `VITE_RELAY_URL` 覆盖，运行时可在 **设置 → 中转** 修改或关闭。
 
-- `room_init` / `getInfoByRoom`：**可用**。注意 `getInfoByRoom` 需要带 buvid cookie（`buvid3`/`buvid4`/`b_nut`），匿名请求会 -352；前端启动时会调 `x/frontend/finger/spi` 拿 buvid 存进 localStorage，之后所有代理请求都会带上。
-- `getDanmuInfo`：仍可能 -352（B 站对数据中心出口的弹幕 token 风控更严）。前端已做兜底：全通道失败时用默认 `broadcastlv.chat.bilibili.com` + 空 token 裸连（部分房间接受）。**这是目前最值得继续攻的点。**
-- 直播流：浏览器直连 B 站 CDN（页面 `<meta name="referrer" content="no-referrer">`，B 站 CDN 放行无 Referer 请求）；`/stream` 同域代理只作直连全挂后的兜底。**尚未在开播状态下充分验证。**
-- 弹幕 WebSocket：浏览器直连 `wss://broadcastlv.chat.bilibili.com/sub`，不受 CORS 限制，正常。
+中转的 `functions/api/[[path]].ts`：
 
-## 本地开发 / 部署
+- 先走 `fetch()`；被 B 站按 TLS 指纹风控（403/412/-352）时自动改用 `cloudflare:sockets` 手写 HTTP/1.1；
+- 扫码 `poll` 的 `Set-Cookie` 会解析成 `cookie_string` / `cookies` 放进 JSON，浏览器才能拿到登录态；
+- `getDanmuInfo` 出现 -352 时抓直播间页面里的 `w_webid` 重试；
+- `x-bili-cookie` 请求头传递用户 Cookie。
+
+## 本地开发
 
 ```bash
-npm install
-npm run dev
-npm run build                     # 输出 dist/
-export CLOUDFLARE_API_TOKEN=xxx   # 权限：Pages 编辑 + 帐户设置读取 + 区域读取 + DNS 编辑
-bash deploy.sh                    # 构建 + 部署 + 绑定自定义域 + 配 DNS（一键）
+npm ci
+npm run dev          # http://localhost:5173
+npm run typecheck
+npm run build        # 输出 dist/
+npm run preview
 ```
 
-`deploy.sh` 里的域名是 `sanlu.yousaling.dpdns.org`，换域名改脚本顶部两个变量即可。
+本地没有 Cloudflare Functions 时，默认中转仍然可用；也可以在设置里填自己的中转。
 
-## 交接建议（给下一个接手的人）
+## 部署
 
-1. 优先解决 `getDanmuInfo` 的 -352：可尝试给 raw 通道带上更完整的浏览器头（含 `LIVE_BUVID`、`b_3` 等）、或改用 B 站开放平台的 token 接口。
-2. 验证直播流直连：找正在开播的房间，确认 mpegts.js / hls.js 直连 B 站 CDN 不被 Referer / Origin 拦截。
-3. 双通道逻辑集中在 `functions/api/[[path]].ts`（`isBanned` + `rawUpstream`），不要轻易改成单通道。
-4. Cloudflare 侧：账号里已有 Pages 项目 `sanlu`、zone `yousaling.dpdns.org`、`lovehgr.dpdns.org`。
+### GitHub Pages（推荐）
+
+仓库根目录的 `.github/workflows/deploy-pages.yml` 会在推送到 `main` 时自动：
+
+1. `npm ci` + `npm run typecheck`；
+2. 以 `VITE_BASE=/<仓库名>/` 构建；
+3. 上传 `sanlu-pwa/dist` 并发布 Pages。
+
+首次使用：仓库 **Settings → Pages → Build and deployment → Source** 选择 **GitHub Actions**。
+
+如需自定义中转，在 **Settings → Secrets and variables → Actions → Variables** 添加 `VITE_RELAY_URL`。
+
+### Cloudflare Pages（备用）
+
+```bash
+npm run build
+export CLOUDFLARE_API_TOKEN=xxx
+bash deploy.sh
+```
+
+`functions/` 会随 Pages 一起部署，提供 `/api/*` 与 `/stream/*`。
+
+## 已知限制
+
+- B 站弹幕正文上限 20 个字符（JS 按 UTF-16 计，emoji 会更保守）。
+- 移动端浏览器可能拦截带声音的自动播放，需要点一次「点此开始播放」。
+- 部分房间的 `getDanmuInfo` 对数据中心出口有额外风控；失败时用默认 host + 空 token 兜底，可能只能看不能发。
+- 登录态保存在 `localStorage`，公共设备用完请退出登录。

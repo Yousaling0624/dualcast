@@ -1,42 +1,73 @@
 /**
  * 全局状态与会话编排：解析房间 → 双路播放 → A 房弹幕 → 聊天室 / 发弹幕。
+ *
+ * 设计对齐 Android 版：
+ * - A 路负责弹幕和声音，B 路负责画面（也可以出声音）；
+ * - 音量/音画偏移按「A 房间 + B 房间」组合记忆；
+ * - 聊天室里点一条弹幕可以 +1 / 回复，B 站没有楼中楼，
+ *   回复直接拼成「回复内容@昵称:原话」发出去；
+ * - 自己发的弹幕本地先插入，8 秒内收到服务端回显就丢掉，避免重复。
  */
 import { reactive, watch } from 'vue'
 import { DanmakuClient, type ChatMsg, type DanmakuStatus } from './danmaku'
-import { StreamPlayer } from './player'
+import { StreamPlayer, type StreamSet } from './player'
 import {
+  biliLogout,
+  fetchAccount,
   fetchBuvid,
+  fetchDanmakuHistory,
   fetchPlay,
   fetchRoomInfo,
-  hasCookie,
+  formatCount,
   initRoom,
-  saveCookieString,
+  qnLabel,
   sendDanmaku,
+  type BiliAccount,
+  type RoomInfo,
 } from './bili'
+import { getCookieValue, hasCookie, saveCookieString } from './net'
+
+export type DanmakuStyle = 'outline' | 'shadow' | 'plain'
+export type VideoScale = 'fit' | 'crop' | 'fill'
 
 export interface SlotState {
   input: string
   roomId: number
+  shortId: number
+  uid: number
   title: string
   uname: string
+  face: string
+  cover: string
   liveStatus: number
+  online: number
+  areaName: string
   qn: number
   acceptQn: { qn: number; desc: string }[]
   state: 'idle' | 'loading' | 'ready' | 'error'
   error: string
+  /** 浏览器拦截了带声音的自动播放，需要一次用户点击 */
+  blocked: boolean
 }
 
 export interface Combo {
-  a: string
+  aInput: string
+  aRoomId: number
   aTitle: string
-  b: string
+  aAnchor: string
+  bInput: string
+  bRoomId: number
   bTitle: string
+  bAnchor: string
+  updatedAt: number
 }
 
 export interface RecentRoom {
+  input: string
   roomId: number
   title: string
   uname: string
+  usedAt: number
 }
 
 export interface Settings {
@@ -47,70 +78,196 @@ export interface Settings {
     speed: number
     area: number
     showName: boolean
-    outline: boolean
+    bold: boolean
+    style: DanmakuStyle
     blocked: string[]
   }
+  video: {
+    scale: VideoScale
+    defaultQn: number
+  }
   volume: { a: number; b: number }
-  cover: boolean
+  commentaryWindow: boolean
+}
+
+interface RoomProfile {
+  aVolume: number
+  bVolume: number
+  offsetMs: number
+  updatedAt: number
+}
+
+export type SendState = {
+  sending: boolean
+  error: string
+  sentSeq: number
+  cooldownUntil: number
+  lastOkAt: number
+}
+
+const LIMIT = 20
+const MAX_MESSAGES = 300
+const SEND_COOLDOWN = 1500
+const SELF_ECHO_WINDOW = 8000
+const NAME_LIMIT = 12
+const QUOTE_RESERVE = 3
+
+const DEFAULT_SETTINGS: Settings = {
+  danmaku: {
+    enabled: true,
+    fontScale: 1,
+    alpha: 0.94,
+    speed: 1,
+    area: 0.62,
+    showName: false,
+    bold: true,
+    style: 'outline',
+    blocked: [],
+  },
+  video: { scale: 'fit', defaultQn: 250 },
+  volume: { a: 0.85, b: 1 },
+  commentaryWindow: false,
 }
 
 function emptySlot(): SlotState {
   return {
     input: '',
     roomId: 0,
+    shortId: 0,
+    uid: 0,
     title: '',
     uname: '',
+    face: '',
+    cover: '',
     liveStatus: 0,
+    online: 0,
+    areaName: '',
     qn: 0,
     acceptQn: [],
     state: 'idle',
     error: '',
+    blocked: false,
   }
 }
 
-function load<T>(key: string, fallback: T): T {
+function readJson<T>(key: string, fallback: T): T {
   try {
     const raw = localStorage.getItem(key)
-    return raw ? { ...fallback, ...JSON.parse(raw) } : fallback
+    return raw ? (JSON.parse(raw) as T) : fallback
   } catch {
     return fallback
   }
 }
 
-const DEFAULT_SETTINGS: Settings = {
-  danmaku: {
-    enabled: true,
-    fontScale: 1,
-    alpha: 1,
-    speed: 1,
-    area: 0.75,
-    showName: false,
-    outline: true,
-    blocked: [],
-  },
-  volume: { a: 1, b: 1 },
-  cover: false,
+function writeJson(key: string, value: unknown) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    /* ignore */
+  }
 }
 
-type View = 'home' | 'live'
+function loadSettings(): Settings {
+  const raw: any = readJson('dc_settings', null)
+  const s: Settings = structuredClone(DEFAULT_SETTINGS)
+  if (!raw || typeof raw !== 'object') return s
+  if (raw.danmaku && typeof raw.danmaku === 'object') {
+    Object.assign(s.danmaku, raw.danmaku)
+    // 旧版本用 outline 布尔值控制描边
+    if (typeof raw.danmaku.outline === 'boolean' && !raw.danmaku.style) {
+      s.danmaku.style = raw.danmaku.outline ? 'outline' : 'shadow'
+    }
+    if (typeof raw.danmaku.bold !== 'boolean') s.danmaku.bold = true
+    if (!Array.isArray(s.danmaku.blocked)) s.danmaku.blocked = []
+  }
+  if (raw.video && typeof raw.video === 'object') {
+    Object.assign(s.video, raw.video)
+  } else if (typeof raw.cover === 'boolean') {
+    s.video.scale = raw.cover ? 'crop' : 'fit'
+  }
+  if (raw.volume && typeof raw.volume === 'object') {
+    s.volume.a = Number(raw.volume.a ?? s.volume.a)
+    s.volume.b = Number(raw.volume.b ?? s.volume.b)
+  }
+  if (typeof raw.commentaryWindow === 'boolean') s.commentaryWindow = raw.commentaryWindow
+  return s
+}
+
+function loadCombos(): Combo[] {
+  const raw: any = readJson('dc_combos', { list: [] })
+  const list: any[] = Array.isArray(raw?.list) ? raw.list : []
+  return list
+    .map((c) => ({
+      aInput: String(c.aInput ?? c.a ?? ''),
+      aRoomId: Number(c.aRoomId || 0),
+      aTitle: String(c.aTitle || ''),
+      aAnchor: String(c.aAnchor || ''),
+      bInput: String(c.bInput ?? c.b ?? ''),
+      bRoomId: Number(c.bRoomId || 0),
+      bTitle: String(c.bTitle || ''),
+      bAnchor: String(c.bAnchor || ''),
+      updatedAt: Number(c.updatedAt || 0),
+    }))
+    .filter((c) => c.aInput && c.bInput)
+}
+
+function loadRecent(): RecentRoom[] {
+  const raw: any = readJson('dc_recent', { list: [] })
+  const list: any[] = Array.isArray(raw?.list) ? raw.list : []
+  return list
+    .map((r) => ({
+      input: String(r.input ?? r.roomId ?? ''),
+      roomId: Number(r.roomId || 0),
+      title: String(r.title || ''),
+      uname: String(r.uname || r.anchor || ''),
+      usedAt: Number(r.usedAt || 0),
+    }))
+    .filter((r) => r.input)
+}
+
+function loadAccount(): BiliAccount {
+  const raw: any = readJson('dc_account', null)
+  return {
+    mid: Number(raw?.mid || 0),
+    name: String(raw?.name || ''),
+    avatar: String(raw?.avatar || ''),
+    level: Number(raw?.level || 0),
+  }
+}
+
+function loadProfiles(): Record<string, RoomProfile> {
+  return readJson('dc_profiles', {})
+}
 
 export const store = reactive({
-  view: 'home' as View,
+  view: 'home' as 'home' | 'live',
   a: emptySlot(),
   b: emptySlot(),
   messages: [] as ChatMsg[],
   viewer: 0,
   danmakuStatus: 'idle' as DanmakuStatus,
+  danmakuError: '',
   loggedIn: hasCookie(),
+  account: loadAccount(),
   starting: false,
   startError: '',
   swapping: false,
   reconnecting: false,
-  sendState: { sending: false, error: '', lastOkAt: 0 },
-  settings: load('dc_settings', DEFAULT_SETTINGS) as Settings,
-  combos: load<{ list: Combo[] }>('dc_combos', { list: [] }).list as Combo[],
-  recent: load<{ list: RecentRoom[] }>('dc_recent', { list: [] }).list as RecentRoom[],
+  qualitySwitching: false,
+  sendState: {
+    sending: false,
+    error: '',
+    sentSeq: 0,
+    cooldownUntil: 0,
+    lastOkAt: 0,
+  } as SendState,
+  settings: loadSettings(),
+  combos: loadCombos(),
+  recent: loadRecent(),
   playing: true,
+  sessionVolumes: { a: 0.85, b: 1 },
+  sessionOffset: 0,
+  commentaryOn: true,
 })
 
 /* ---------- 非响应式实例 ---------- */
@@ -121,47 +278,84 @@ let playerB: StreamPlayer | null = null
 let videoAEl: HTMLVideoElement | null = null
 let videoBEl: HTMLVideoElement | null = null
 
+const slotStreams: Record<'a' | 'b', StreamSet> = {
+  a: { flv: [], hls: [] },
+  b: { flv: [], hls: [] },
+}
+
 /** 弹幕层订阅：canvas 每帧从这里拿新弹幕去画 */
 export const feedBuffer: ChatMsg[] = []
 
-const MAX_MESSAGES = 200
 let pushSeq = 0
+let historySeq = 0
+let resolveToken = { a: 0, b: 0 }
+let saveSlotsTimer: number | null = null
+let saveProfileTimer: number | null = null
+let wakeLock: WakeLockSentinel | null = null
+const pendingSelfEcho: { text: string; until: number }[] = []
 
-function pushMessage(m: ChatMsg) {
-  feedBuffer.push(m)
-  store.messages.push(m)
+const profiles = loadProfiles()
+
+watch(
+  () => store.settings,
+  () => writeJson('dc_settings', store.settings),
+  { deep: true }
+)
+
+watch(
+  () => [store.a.input, store.b.input],
+  () => persistSlots(),
+  { deep: true }
+)
+
+/* ---------- 消息 ---------- */
+
+function hasDmid(dmid?: string): boolean {
+  if (!dmid) return false
+  return store.messages.some((m) => m.dmid === dmid)
+}
+
+function trimMessages() {
   if (store.messages.length > MAX_MESSAGES) {
     store.messages.splice(0, store.messages.length - MAX_MESSAGES)
   }
 }
 
-watch(
-  () => store.settings,
-  () => localStorage.setItem('dc_settings', JSON.stringify(store.settings)),
-  { deep: true }
-)
+function consumeSelfEcho(text: string): boolean {
+  const now = Date.now()
+  while (pendingSelfEcho.length && pendingSelfEcho[0].until < now) pendingSelfEcho.shift()
+  const i = pendingSelfEcho.findIndex((e) => e.text === text)
+  if (i < 0) return false
+  pendingSelfEcho.splice(i, 1)
+  return true
+}
 
-// 音量实时应用到两个播放器
-watch(
-  () => store.settings.volume,
-  (v) => {
-    playerA?.setMuted(v.a === 0)
-    playerB?.setMuted(v.b === 0)
-    if (videoAEl) videoAEl.volume = Math.min(v.a, 1)
-    if (videoBEl) videoBEl.volume = Math.min(v.b, 1)
-  },
-  { deep: true }
-)
+function pushMessage(m: ChatMsg) {
+  if (m.self && consumeSelfEcho(m.text)) return
+  if (hasDmid(m.dmid)) return
+  const msg: ChatMsg = { ...m, seq: m.seq || 900000000 + ++pushSeq }
+  store.messages.push(msg)
+  if (!msg.history) feedBuffer.push(msg)
+  trimMessages()
+}
+
+function insertHistory(list: ChatMsg[]) {
+  const fresh = list
+    .filter((m) => m.text && !hasDmid(m.dmid))
+    .map((m) => ({ ...m, seq: -(++historySeq), history: true }))
+  if (!fresh.length) return
+  store.messages.unshift(...fresh)
+  trimMessages()
+}
 
 /* ---------- 视频 ---------- */
 
 export function bindVideos(a: HTMLVideoElement, b: HTMLVideoElement) {
   videoAEl = a
   videoBEl = b
-  playerA?.setMuted(store.settings.volume.a === 0)
-  playerB?.setMuted(store.settings.volume.b === 0)
-  playerA?.play()
-  playerB?.play()
+  applyVolumes()
+  if (playerA) playerA.play()
+  if (playerB) playerB.play()
 }
 
 function destroyPlayers() {
@@ -171,73 +365,155 @@ function destroyPlayers() {
   playerB = null
 }
 
-function attachPlayer(slot: 'a' | 'b', play: { flv: string[]; hls: string[] }) {
+function attachPlayer(slot: 'a' | 'b', streams: StreamSet) {
   const video = slot === 'a' ? videoAEl : videoBEl
   if (!video) return
-  const p = new StreamPlayer(video, play, (state) => {
-    if (slot === 'a') {
-      if (state === 'error') slotOf('a').error = 'A 路播放失败，点右上角重连试试'
-    } else if (state === 'error') {
-      slotOf('b').error = 'B 路播放失败，点右上角重连试试'
+  if (!streams.flv.length && !streams.hls.length) {
+    setSlotError(slot, '没有可用的播放地址')
+    return
+  }
+  const s = slot === 'a' ? store.a : store.b
+  const p = new StreamPlayer(
+    video,
+    streams,
+    (state, msg) => {
+      if (state === 'playing') s.blocked = false
+      if (state === 'error') setSlotError(slot, msg || `${slot.toUpperCase()} 路播放失败，点右上角重连试试`)
+    },
+    () => {
+      s.blocked = true
     }
-  })
-  p.setMuted(store.settings.volume[slot] === 0)
+  )
+  p.setVolume(store.sessionVolumes[slot])
+  p.setSyncOffset(offsetFor(slot))
   p.start()
+  // 换清晰度 / 切画面时保持原来的暂停状态
+  if (!store.playing) p.pause()
   if (slot === 'a') playerA = p
   else playerB = p
 }
 
-function slotOf(key: 'a' | 'b'): SlotState {
-  return key === 'a' ? store.a : store.b
+function setSlotError(slot: 'a' | 'b', msg: string) {
+  const s = slot === 'a' ? store.a : store.b
+  s.error = msg
+}
+
+export function attachStreams() {
+  attachPlayer('a', slotStreams.a)
+  attachPlayer('b', slotStreams.b)
+}
+
+function applyVolumes() {
+  if (playerA) playerA.setVolume(store.sessionVolumes.a)
+  if (playerB) playerB.setVolume(store.sessionVolumes.b)
+  if (videoAEl) videoAEl.volume = Math.min(store.sessionVolumes.a, 1)
+  if (videoBEl) videoBEl.volume = Math.min(store.sessionVolumes.b, 1)
+}
+
+/** sessionOffset > 0：A 晚一点；< 0：改为让 B 晚一点，效果是 A 相对提前 */
+function offsetFor(slot: 'a' | 'b'): number {
+  const off = store.sessionOffset
+  if (slot === 'a') return Math.max(0, off)
+  return Math.max(0, -off)
+}
+
+function applyOffset() {
+  playerA?.setSyncOffset(offsetFor('a'))
+  playerB?.setSyncOffset(offsetFor('b'))
 }
 
 /* ---------- 房间解析 ---------- */
 
-export async function resolveSlot(key: 'a' | 'b', input?: string) {
-  const slot = slotOf(key)
+function fillSlot(slot: SlotState, room: RoomInfo) {
+  slot.roomId = room.roomId
+  slot.shortId = room.shortId
+  slot.uid = room.uid
+  slot.title = room.title
+  slot.uname = room.uname
+  slot.face = room.face
+  slot.cover = room.cover || room.keyframe
+  slot.liveStatus = room.liveStatus
+  slot.online = room.online
+  slot.areaName = room.areaName
+}
+
+export async function resolveSlot(key: 'a' | 'b', input?: string): Promise<SlotState> {
+  const slot = key === 'a' ? store.a : store.b
   const value = (input ?? slot.input).trim()
   if (!value) {
     slot.state = 'error'
     slot.error = '先填房间号'
-    return
+    return slot
   }
   slot.input = value
   slot.state = 'loading'
   slot.error = ''
+  store.startError = ''
+  const token = ++resolveToken[key]
   try {
     const { roomId } = await initRoom(value)
-    const [info, play] = await Promise.all([fetchRoomInfo(roomId), fetchPlay(roomId)])
-    slot.roomId = roomId
-    slot.title = info.title
-    slot.uname = info.uname
-    slot.liveStatus = info.liveStatus
-    slot.qn = play.qn
-    slot.acceptQn = play.acceptQn
-    slot.state = 'ready'
-    if (info.liveStatus !== 1) slot.error = info.liveStatus === 2 ? '轮播中' : '未开播'
-    // 播放地址挂在 slot 上，attach 时用
-    slotStreams[key] = { flv: [], hls: [] }
-    for (const s of play.streams) {
-      if (s.protocol === 'flv') slotStreams[key].flv.push(...s.urls)
-      else slotStreams[key].hls.push(...s.urls)
+    const [infoR, playR] = await Promise.allSettled([
+      fetchRoomInfo(roomId),
+      fetchPlay(roomId, store.settings.video.defaultQn),
+    ])
+    if (token !== resolveToken[key]) return slot
+    if (infoR.status === 'rejected' && playR.status === 'rejected') {
+      throw infoR.reason
     }
+    if (infoR.status === 'fulfilled') fillSlot(slot, infoR.value)
+    else slot.roomId = roomId
+
+    if (playR.status === 'fulfilled') {
+      const play = playR.value
+      slot.qn = play.qn || store.settings.video.defaultQn
+      slot.acceptQn = play.acceptQn.length
+        ? play.acceptQn
+        : [10000, 400, 250, 150, 80].map((qn) => ({ qn, desc: qnLabel(qn) }))
+      slot.liveStatus = play.liveStatus || slot.liveStatus
+      slotStreams[key] = { flv: [], hls: [] }
+      for (const s of play.streams) {
+        if (s.protocol === 'flv') slotStreams[key].flv.push(...s.urls)
+        else slotStreams[key].hls.push(...s.urls)
+      }
+    } else {
+      slotStreams[key] = { flv: [], hls: [] }
+      slot.error = playR.reason instanceof Error ? playR.reason.message : '获取播放地址失败'
+    }
+
+    slot.state = 'ready'
+    if (slot.liveStatus !== 1 && slot.liveStatus !== 2) {
+      slot.error = slot.liveStatus === 2 ? '轮播中' : '未开播'
+    } else if (!slotStreams[key].flv.length && !slotStreams[key].hls.length && !slot.error) {
+      slot.error = '拿不到播放地址，可能需要登录或稍后重试'
+    }
+    persistSlots()
+    return slot
   } catch (e) {
+    if (token !== resolveToken[key]) return slot
     slot.state = 'error'
     slot.error = e instanceof Error ? e.message : String(e)
+    return slot
   }
 }
 
-const slotStreams: Record<'a' | 'b', { flv: string[]; hls: string[] }> = {
-  a: { flv: [], hls: [] },
-  b: { flv: [], hls: [] },
+export function resolvePreview(key: 'a' | 'b') {
+  void resolveSlot(key)
 }
 
-export async function resolvePreview(key: 'a' | 'b') {
-  // 首页「检测」用：只解析信息，不开播
-  await resolveSlot(key)
+export function clearSlot(key: 'a' | 'b') {
+  resolveToken[key]++
+  const slot = key === 'a' ? store.a : store.b
+  Object.assign(slot, emptySlot())
+  slotStreams[key] = { flv: [], hls: [] }
+  store.startError = ''
+  persistSlots()
 }
 
 /* ---------- 会话 ---------- */
+
+function playable(status: number): boolean {
+  return status === 1 || status === 2
+}
 
 export async function startSession() {
   if (store.starting) return
@@ -247,11 +523,17 @@ export async function startSession() {
     await Promise.all([resolveSlot('a'), resolveSlot('b')])
     if (store.a.state !== 'ready' || store.b.state !== 'ready') {
       throw new Error(
-        store.a.state === 'error' ? `A 路解析失败：${store.a.error}` : store.b.error || '解析失败'
+        store.a.state === 'error'
+          ? `A 路解析失败：${store.a.error}`
+          : `B 路解析失败：${store.b.error}`
       )
     }
-    if (store.a.liveStatus !== 1 || store.b.liveStatus !== 1) {
-      throw new Error('两个房间都得在播才能叠，检查下未开播的那路')
+    if (!playable(store.a.liveStatus) || !playable(store.b.liveStatus)) {
+      const offline = playable(store.a.liveStatus) ? store.b : store.a
+      throw new Error(`「${offline.title || offline.input}」当前未开播，开播后再试`)
+    }
+    if (!hasStreams('a') || !hasStreams('b')) {
+      throw new Error('有一路没有拿到播放地址，点重连再试一次')
     }
     beginSession()
   } catch (e) {
@@ -261,85 +543,196 @@ export async function startSession() {
   }
 }
 
+function hasStreams(key: 'a' | 'b'): boolean {
+  return slotStreams[key].flv.length > 0 || slotStreams[key].hls.length > 0
+}
+
+function profileKey(): string {
+  return `${store.a.roomId}:${store.b.roomId}`
+}
+
+function applyRoomProfile() {
+  const p = profiles[profileKey()]
+  if (p) {
+    store.sessionVolumes.a = Number(p.aVolume)
+    store.sessionVolumes.b = Number(p.bVolume)
+    store.sessionOffset = Number(p.offsetMs || 0)
+  } else {
+    store.sessionVolumes.a = store.settings.volume.a
+    store.sessionVolumes.b = store.settings.volume.b
+    store.sessionOffset = 0
+  }
+}
+
+function saveRoomProfileSoon() {
+  if (!store.a.roomId || !store.b.roomId) return
+  if (saveProfileTimer) clearTimeout(saveProfileTimer)
+  saveProfileTimer = window.setTimeout(() => {
+    const p: RoomProfile = {
+      aVolume: store.sessionVolumes.a,
+      bVolume: store.sessionVolumes.b,
+      offsetMs: store.sessionOffset,
+      updatedAt: Date.now(),
+    }
+    profiles[profileKey()] = p
+    writeJson('dc_profiles', profiles)
+    // 下次遇到新组合时，起手就是最常用的音量配比
+    store.settings.volume.a = p.aVolume
+    store.settings.volume.b = p.bVolume
+  }, 500)
+}
+
 function beginSession() {
   destroyPlayers()
   store.view = 'live'
   store.playing = true
-  // 弹幕在 attachVideos 后启动（需要等 view 切过去拿 video 元素？弹幕不依赖 video，直接连）
-  danmaku
-    .connect(store.a.roomId, {
-      onMsg: pushMessage,
-      onStatus: (s) => (store.danmakuStatus = s),
-      onViewer: (n) => (store.viewer = n),
-    })
-    .catch(() => {})
+  store.a.blocked = false
+  store.b.blocked = false
+  store.messages = []
+  feedBuffer.length = 0
+  applyRoomProfile()
+  store.commentaryOn = store.settings.commentaryWindow
+  store.danmakuError = ''
+  store.viewer = store.a.online
+  // 播放器等 LiveView 挂载、拿到 video 元素后再绑定（见 LiveView onMounted）
+  connectDanmaku()
   saveCombo()
-  pushRecent()
+  pushRecentFromSlot(store.a)
+  pushRecentFromSlot(store.b)
+  updateMediaSession()
+  void requestWakeLock()
 }
 
-/** LiveView 挂载后调用：把待播的流接到 video 元素上 */
-export function attachStreams() {
-  if (slotStreams.a.flv.length || slotStreams.a.hls.length) {
-    attachPlayer('a', slotStreams.a)
-  }
-  if (slotStreams.b.flv.length || slotStreams.b.hls.length) {
-    attachPlayer('b', slotStreams.b)
-  }
+function connectDanmaku() {
+  danmaku.stop()
+  store.messages = []
+  feedBuffer.length = 0
+  store.danmakuStatus = 'connecting'
+  store.danmakuError = ''
+  const roomId = store.a.roomId
+  const buvid = getCookieValue('buvid3')
+  danmaku
+    .connect(roomId, store.account.mid || 0, buvid, {
+      onMsg: pushMessage,
+      onStatus: (s, err) => {
+        store.danmakuStatus = s
+        store.danmakuError = err || ''
+      },
+      onViewer: (n) => {
+        if (n > 0) store.viewer = n
+      },
+    })
+    .catch(() => {})
+
+  void fetchDanmakuHistory(roomId).then((list) => {
+    if (roomId !== store.a.roomId) return
+    insertHistory(
+      list.map((h, i) => ({
+        seq: 0,
+        kind: 'danmu' as const,
+        text: h.text,
+        uname: h.uname,
+        uid: h.uid,
+        dmid: h.dmid || `history-${i}`,
+        color: h.color,
+        medal: h.medal,
+        history: true,
+      }))
+    )
+  })
+}
+
+export function retryDanmaku() {
+  danmaku.retry(store.account.mid || 0, getCookieValue('buvid3'))
 }
 
 export async function reconnect() {
   if (store.reconnecting) return
   store.reconnecting = true
   try {
-    await Promise.all([resolveSlot('a'), resolveSlot('b')])
+    const a = await resolveSlot('a', store.a.input)
+    const b = await resolveSlot('b', store.b.input)
+    if (a.state !== 'ready' || b.state !== 'ready') throw new Error('房间解析失败')
     destroyPlayers()
     attachStreams()
-    danmaku
-      .connect(store.a.roomId, {
-        onMsg: pushMessage,
-        onStatus: (s) => (store.danmakuStatus = s),
-        onViewer: (n) => (store.viewer = n),
-      })
-      .catch(() => {})
-    store.messages = []
+    store.playing = true
+    connectDanmaku()
+    applyOffset()
+  } catch (e) {
+    store.startError = e instanceof Error ? e.message : String(e)
   } finally {
     store.reconnecting = false
   }
 }
 
-export async function swap() {
-  if (store.swapping) return
+export function swap() {
+  if (store.swapping || store.view !== 'live') {
+    if (store.view !== 'live') {
+      const a = { ...store.a }
+      store.a = { ...store.b }
+      store.b = a
+      persistSlots()
+    }
+    return
+  }
   store.swapping = true
-  const { a, b } = store
-  const sa = { ...a }
-  store.a = { ...b }
-  store.b = sa
-  const streams = slotStreams.a
-  slotStreams.a = slotStreams.b
-  slotStreams.b = streams
-  store.messages = []
   try {
-    await Promise.all([resolveSlot('a'), resolveSlot('b')])
-    if (store.a.state !== 'ready' || store.b.state !== 'ready') throw new Error('解析失败')
-    beginSessionInPlace()
-  } catch (e) {
-    store.startError = e instanceof Error ? e.message : String(e)
+    const a = { ...store.a }
+    store.a = { ...store.b }
+    store.b = a
+    const s = slotStreams.a
+    slotStreams.a = slotStreams.b
+    slotStreams.b = s
+    const va = store.sessionVolumes.a
+    store.sessionVolumes.a = store.sessionVolumes.b
+    store.sessionVolumes.b = va
+    destroyPlayers()
+    attachStreams()
+    applyVolumes()
+    applyOffset()
+    connectDanmaku()
+    updateMediaSession()
+    persistSlots()
+    saveRoomProfileSoon()
   } finally {
     store.swapping = false
   }
 }
 
-function beginSessionInPlace() {
-  destroyPlayers()
-  attachStreams()
-  store.playing = true
-  danmaku
-    .connect(store.a.roomId, {
-      onMsg: pushMessage,
-      onStatus: (s) => (store.danmakuStatus = s),
-      onViewer: (n) => (store.viewer = n),
-    })
-    .catch(() => {})
+export function setQuality(key: 'a' | 'b', qn: number) {
+  const slot = key === 'a' ? store.a : store.b
+  if (!slot.roomId || store.qualitySwitching) return
+  store.qualitySwitching = true
+  void (async () => {
+    try {
+      const play = await fetchPlay(slot.roomId, qn)
+      slot.qn = play.qn || qn
+      slot.error = ''
+      slot.acceptQn = play.acceptQn.length ? play.acceptQn : slot.acceptQn
+      slotStreams[key] = { flv: [], hls: [] }
+      for (const s of play.streams) {
+        if (s.protocol === 'flv') slotStreams[key].flv.push(...s.urls)
+        else slotStreams[key].hls.push(...s.urls)
+      }
+      if (key === 'b') store.settings.video.defaultQn = qn
+      if (store.view === 'live') {
+        if (key === 'a') {
+          playerA?.destroy()
+          playerA = null
+        } else {
+          playerB?.destroy()
+          playerB = null
+        }
+        attachPlayer(key, slotStreams[key])
+        applyVolumes()
+        applyOffset()
+      }
+    } catch (e) {
+      slot.error = e instanceof Error ? e.message : '切换清晰度失败'
+    } finally {
+      store.qualitySwitching = false
+    }
+  })()
 }
 
 export function exitSession() {
@@ -349,128 +742,356 @@ export function exitSession() {
   slotStreams.b = { flv: [], hls: [] }
   store.view = 'home'
   store.messages = []
+  store.playing = true
+  store.a.blocked = false
+  store.b.blocked = false
+  store.danmakuStatus = 'idle'
+  store.danmakuError = ''
+  feedBuffer.length = 0
+  releaseWakeLock()
+  if ('mediaSession' in navigator) navigator.mediaSession.metadata = null
+}
+
+/** 用户点击后恢复播放（解除浏览器自动播放限制） */
+export function resumePlayback() {
+  store.playing = true
+  store.a.blocked = false
+  store.b.blocked = false
+  playerA?.play()
+  playerB?.play()
+  void requestWakeLock()
 }
 
 export function togglePlay() {
+  if (store.a.blocked || store.b.blocked) {
+    resumePlayback()
+    return
+  }
   store.playing = !store.playing
   if (store.playing) {
     playerA?.play()
     playerB?.play()
+    void requestWakeLock()
   } else {
     playerA?.pause()
     playerB?.pause()
+    releaseWakeLock()
   }
 }
 
-export async function setQuality(key: 'a' | 'b', qn: number) {
-  const slot = slotOf(key)
-  if (slot.roomId) {
-    const play = await fetchPlay(slot.roomId, qn)
-    slot.qn = play.qn
-    slotStreams[key] = { flv: [], hls: [] }
-    for (const s of play.streams) {
-      if (s.protocol === 'flv') slotStreams[key].flv.push(...s.urls)
-      else slotStreams[key].hls.push(...s.urls)
-    }
-    if (key === 'b' && playerB) {
-      playerB.destroy()
-      attachPlayer('b', slotStreams.b)
-    }
-  }
+export function toggleDanmaku() {
+  store.settings.danmaku.enabled = !store.settings.danmaku.enabled
 }
 
-/* ---------- 弹幕发送 ---------- */
+/* ---------- 混音 ---------- */
 
-const LIMIT = 20
+export function setVolume(which: 'a' | 'b', v: number) {
+  const vol = Math.max(0, Math.min(1, v))
+  store.sessionVolumes[which] = vol
+  store.settings.volume[which] = vol
+  applyVolumes()
+  saveRoomProfileSoon()
+}
+
+export function nudgeOffset(deltaMs: number) {
+  store.sessionOffset = Math.max(-5000, Math.min(5000, store.sessionOffset + deltaMs))
+  applyOffset()
+  saveRoomProfileSoon()
+}
+
+export function resetOffset() {
+  store.sessionOffset = 0
+  applyOffset()
+  saveRoomProfileSoon()
+}
+
+export function setCommentary(on: boolean) {
+  store.commentaryOn = on
+  store.settings.commentaryWindow = on
+}
+
+/* ---------- 发弹幕 ---------- */
+
+export function replyName(target: ChatMsg): string {
+  return (target.uname || 'TA').replace(/\s+/g, ' ').trim().slice(0, NAME_LIMIT) || 'TA'
+}
+
+export function replyInputLimit(target: ChatMsg): number {
+  const budget = LIMIT - replyName(target).length - 2
+  return Math.max(1, budget - QUOTE_RESERVE)
+}
 
 export function buildReply(reply: string, target: ChatMsg): string {
-  const name = (target.uname || '用户').slice(0, 12)
-  const budget = LIMIT - reply.length - 1 - name.length - 1
-  if (budget <= 0) return reply.slice(0, LIMIT)
-  const quote =
-    target.text.length > budget ? target.text.slice(0, Math.max(budget - 1, 0)) + '…' : target.text
-  return `${reply}@${name}:${quote}`.slice(0, LIMIT)
+  const name = replyName(target)
+  const budget = Math.max(1, LIMIT - name.length - 2)
+  const replyCap = Math.max(1, budget - QUOTE_RESERVE)
+  const body = reply.trim().replace(/[\r\n]+/g, ' ').slice(0, replyCap)
+  const quoteRoom = budget - body.length
+  const quote = target.text.trim().replace(/[\r\n]+/g, ' ')
+  const shortened =
+    quoteRoom <= 0
+      ? ''
+      : quote.length <= quoteRoom
+        ? quote
+        : quoteRoom === 1
+          ? '…'
+          : `${quote.slice(0, quoteRoom - 1)}…`
+  return `${body}@${name}:${shortened}`.slice(0, LIMIT)
 }
 
-export async function send(text: string, replyTarget?: ChatMsg | null) {
-  if (store.sendState.sending) return
-  const raw = text.trim()
-  if (!raw) return
+export function canInteract(target: ChatMsg | null): boolean {
+  return !!target && target.kind === 'danmu' && !target.self
+}
+
+export async function send(text: string, replyTarget?: ChatMsg | null): Promise<boolean> {
+  if (store.sendState.sending) return false
+  const raw = text.trim().replace(/[\r\n]+/g, ' ')
+  if (!raw) return false
+  if (!store.loggedIn) {
+    store.sendState.error = '发弹幕需要先登录 B 站账号'
+    return false
+  }
+  const now = Date.now()
+  if (now < store.sendState.cooldownUntil) {
+    store.sendState.error = `刚发过，等 ${Math.ceil((store.sendState.cooldownUntil - now) / 1000)} 秒再发`
+    return false
+  }
+  const final = replyTarget ? buildReply(raw, replyTarget) : raw.slice(0, LIMIT)
+  if (!final) return false
   store.sendState.sending = true
   store.sendState.error = ''
   try {
-    const final = replyTarget ? buildReply(raw, replyTarget) : raw.slice(0, LIMIT)
     const r = await sendDanmaku(store.a.roomId, final)
-    if (r.ok) {
-      store.sendState.lastOkAt = Date.now()
-      pushMessage({
-        seq: 900000000 + ++pushSeq,
-        kind: 'danmu',
-        text: final,
-        uname: '我',
-        self: true,
-      })
-    } else {
+    if (!r.ok) {
       store.sendState.error = r.message
+      return false
     }
+    const mine: ChatMsg = {
+      seq: 900000000 + ++pushSeq,
+      kind: 'danmu',
+      text: final,
+      uname: store.account.name || '我',
+      uid: store.account.mid || undefined,
+      color: 0xffffff,
+      self: true,
+    }
+    // 先插本地，再登记回显窗口；pushMessage 对 self 消息会查这个窗口
+    pushMessage(mine)
+    pendingSelfEcho.push({ text: final, until: Date.now() + SELF_ECHO_WINDOW })
+    store.sendState.sentSeq++
+    store.sendState.lastOkAt = Date.now()
+    store.sendState.cooldownUntil = Date.now() + SEND_COOLDOWN
+    return true
   } catch (e) {
-    store.sendState.error = e instanceof Error ? e.message : String(e)
+    store.sendState.error = e instanceof Error ? e.message : '发送失败'
+    return false
   } finally {
     store.sendState.sending = false
   }
 }
 
-export async function plusOne(target: ChatMsg) {
-  await send('+1')
+export async function plusOne(target: ChatMsg): Promise<boolean> {
+  if (!canInteract(target)) return false
+  const text = target.text.trim()
+  return send(text.length <= LIMIT ? text : '+1')
+}
+
+export function clearSendError() {
+  store.sendState.error = ''
 }
 
 /* ---------- 登录 ---------- */
 
 export async function finishLogin(cookieStr: string) {
   saveCookieString(cookieStr)
-  await fetchBuvid()
+  const [account] = await Promise.all([fetchAccount(), fetchBuvid()])
+  store.account = account || {
+    mid: Number(getCookieValue('DedeUserID') || 0),
+    name: '已登录',
+    avatar: '',
+    level: 0,
+  }
   store.loggedIn = true
+  writeJson('dc_account', store.account)
+  if (store.view === 'live') {
+    danmaku.retry(store.account.mid || 0, getCookieValue('buvid3'))
+  }
 }
 
-export function logout() {
+export async function logout() {
+  await biliLogout()
   localStorage.removeItem('dc_cookies')
   store.loggedIn = false
+  store.account = { mid: 0, name: '', avatar: '', level: 0 }
+  writeJson('dc_account', store.account)
+  if (store.view === 'live') danmaku.retry(0, '')
+}
+
+export async function refreshProfile() {
+  if (!store.loggedIn) return
+  const account = await fetchAccount()
+  if (account) {
+    store.account = account
+    writeJson('dc_account', store.account)
+  }
 }
 
 /* ---------- 组合与最近 ---------- */
 
 function saveCombo() {
   const combo: Combo = {
-    a: store.a.input,
+    aInput: store.a.input,
+    aRoomId: store.a.roomId,
     aTitle: store.a.title || store.a.uname,
-    b: store.b.input,
+    aAnchor: store.a.uname,
+    bInput: store.b.input,
+    bRoomId: store.b.roomId,
     bTitle: store.b.title || store.b.uname,
+    bAnchor: store.b.uname,
+    updatedAt: Date.now(),
   }
-  const list = store.combos.filter((c) => !(c.a === combo.a && c.b === combo.b))
+  const list = store.combos.filter(
+    (c) => !(c.aRoomId === combo.aRoomId && c.bRoomId === combo.bRoomId)
+  )
   list.unshift(combo)
   store.combos = list.slice(0, 12)
-  localStorage.setItem('dc_combos', JSON.stringify({ list: store.combos }))
+  writeJson('dc_combos', { list: store.combos })
 }
 
-export function deleteCombo(i: number) {
-  store.combos.splice(i, 1)
-  localStorage.setItem('dc_combos', JSON.stringify({ list: store.combos }))
+export function deleteCombo(index: number) {
+  store.combos.splice(index, 1)
+  writeJson('dc_combos', { list: store.combos })
 }
 
 export async function startCombo(combo: Combo) {
-  store.a.input = combo.a
-  store.b.input = combo.b
+  store.a.input = combo.aInput
+  store.b.input = combo.bInput
   await startSession()
 }
 
-function pushRecent() {
-  const list = store.recent.filter((r) => r.roomId !== store.a.roomId)
-  list.unshift({ roomId: store.a.roomId, title: store.a.title, uname: store.a.uname })
-  store.recent = list.slice(0, 8)
-  localStorage.setItem('dc_recent', JSON.stringify({ list: store.recent }))
+function pushRecentFromSlot(slot: SlotState) {
+  if (!slot.roomId) return
+  const list = store.recent.filter((r) => r.roomId !== slot.roomId)
+  list.unshift({
+    input: slot.input || String(slot.roomId),
+    roomId: slot.roomId,
+    title: slot.title,
+    uname: slot.uname,
+    usedAt: Date.now(),
+  })
+  store.recent = list.slice(0, 12)
+  writeJson('dc_recent', { list: store.recent })
 }
 
-export function useRecent(room: RecentRoom) {
-  store.a.input = String(room.roomId)
-  void startSession()
+export async function useRecent(room: RecentRoom) {
+  const key: 'a' | 'b' = !store.a.input ? 'a' : !store.b.input ? 'b' : 'b'
+  const slot = key === 'a' ? store.a : store.b
+  slot.input = room.input
+  await resolveSlot(key, room.input)
 }
+
+/* ---------- 持久化输入 ---------- */
+
+function persistSlots() {
+  if (saveSlotsTimer) clearTimeout(saveSlotsTimer)
+  saveSlotsTimer = window.setTimeout(() => {
+    writeJson('dc_slots', {
+      a: { input: store.a.input },
+      b: { input: store.b.input },
+    })
+  }, 300)
+}
+
+function restoreSlots() {
+  const raw: any = readJson('dc_slots', null)
+  if (raw?.a?.input) store.a.input = String(raw.a.input)
+  if (raw?.b?.input) store.b.input = String(raw.b.input)
+  if (store.a.input) void resolveSlot('a')
+  if (store.b.input) void resolveSlot('b')
+}
+
+/* ---------- 系统集成 ---------- */
+
+function updateMediaSession() {
+  if (!('mediaSession' in navigator)) return
+  try {
+    if (typeof MediaMetadata !== 'undefined') {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: store.b.title || '叠播',
+        artist: store.a.uname ? `${store.a.uname} · 弹幕` : store.a.title || '叠播',
+        artwork: store.a.face ? [{ src: store.a.face, sizes: '512x512' }] : [],
+      })
+    }
+    navigator.mediaSession.setActionHandler('play', () => {
+      if (!store.playing) togglePlay()
+    })
+    navigator.mediaSession.setActionHandler('pause', () => {
+      if (store.playing) togglePlay()
+    })
+    navigator.mediaSession.setActionHandler('stop', () => exitSession())
+  } catch {
+    /* 部分浏览器不支持某些 action */
+  }
+}
+
+async function requestWakeLock() {
+  if (!('wakeLock' in navigator) || wakeLock) return
+  try {
+    wakeLock = await (navigator as any).wakeLock.request('screen')
+    wakeLock?.addEventListener?.('release', () => {
+      wakeLock = null
+    })
+  } catch {
+    wakeLock = null
+  }
+}
+
+function releaseWakeLock() {
+  try {
+    wakeLock?.release()
+  } catch {
+    /* ignore */
+  }
+  wakeLock = null
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && store.view === 'live' && store.playing) {
+    void requestWakeLock()
+  }
+})
+
+/* ---------- 对外只读辅助 ---------- */
+
+export function viewerLabel(): string {
+  return store.viewer > 0 ? `${formatCount(store.viewer)}人气` : ''
+}
+
+export function slotOf(key: 'a' | 'b'): SlotState {
+  return key === 'a' ? store.a : store.b
+}
+
+export function isPlayable(status: number): boolean {
+  return playable(status)
+}
+
+/** 调试用：URL 带 ?debug=1 时挂到 window，方便排查播放/弹幕问题 */
+export function debugSnapshot() {
+  return {
+    view: store.view,
+    slots: {
+      a: { roomId: store.a.roomId, state: store.a.state, error: store.a.error, liveStatus: store.a.liveStatus, qn: store.a.qn },
+      b: { roomId: store.b.roomId, state: store.b.state, error: store.b.error, liveStatus: store.b.liveStatus, qn: store.b.qn },
+    },
+    streams: {
+      a: { flv: slotStreams.a.flv.length, hls: slotStreams.a.hls.length },
+      b: { flv: slotStreams.b.flv.length, hls: slotStreams.b.hls.length },
+    },
+    players: { a: !!playerA, b: !!playerB },
+    messages: store.messages.length,
+    danmaku: store.danmakuStatus,
+    playing: store.playing,
+  }
+}
+
+restoreSlots()

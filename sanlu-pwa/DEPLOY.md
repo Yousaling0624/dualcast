@@ -1,6 +1,9 @@
 # 三叠播 PWA 部署指南
 
-目标地址：`https://sanlu.yousaling.dpdns.org`（备用：`https://sanlu.pages.dev`）
+> 现在主站由 GitHub Actions 自动部署到 **https://yousaling0624.github.io/dualcast/**（见仓库根目录 `.github/workflows/deploy-pages.yml`）。
+> 本文档保留 Cloudflare Pages 的部署方式：它同时也是默认 API/直播流中转。
+
+Cloudflare 目标地址：`https://sanlu.yousaling.dpdns.org`（备用：`https://sanlu.pages.dev`）
 
 ## 方式一：给我 Token，我帮你全自动部署（推荐）
 

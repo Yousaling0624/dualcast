@@ -1,70 +1,171 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
-import { store, resolvePreview, startSession, startCombo, deleteCombo, useRecent, swap } from '../lib/store'
-import type { SlotState } from '../lib/store'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import {
+  clearSlot,
+  deleteCombo,
+  isPlayable,
+  resolvePreview,
+  startCombo,
+  startSession,
+  store,
+  swap,
+  useRecent,
+} from '../lib/store'
+import type { Combo, SlotState } from '../lib/store'
+import { formatCount } from '../lib/bili'
+import { netStatus } from '../lib/net'
+import SettingsDrawer from './SettingsDrawer.vue'
 
-const settingsOpen = ref(false)
+const drawer = ref<InstanceType<typeof SettingsDrawer> | null>(null)
+const installEvent = ref<any>(null)
+const showInstall = ref(false)
+
+const canStart = computed(
+  () =>
+    !!store.a.input.trim() &&
+    !!store.b.input.trim() &&
+    store.a.state === 'ready' &&
+    store.b.state === 'ready' &&
+    isPlayable(store.a.liveStatus) &&
+    isPlayable(store.b.liveStatus) &&
+    !store.starting
+)
 
 function slotLabel(s: SlotState): string {
   if (s.state === 'loading') return '解析中…'
   if (s.state === 'error') return s.error || '解析失败'
   if (s.state === 'ready') {
-    if (s.liveStatus === 1) return `直播中 · ${s.uname || s.title}`
+    if (s.liveStatus === 1) return s.error || `直播中${s.online ? ` · ${formatCount(s.online)}人气` : ''}`
     if (s.liveStatus === 2) return '轮播中'
     return '未开播'
   }
   return ''
 }
+
+function liveText(status: number): string {
+  return status === 1 ? '直播中' : status === 2 ? '轮播' : '未开播'
+}
+
+function openSettings(tab: 'account' | 'danmaku' | 'mix' | 'video' | 'relay' | 'about' = 'account') {
+  drawer.value?.open(tab)
+}
+
+function onCombo(c: Combo) {
+  void startCombo(c)
+}
+
+function install() {
+  const e = installEvent.value
+  if (!e) return
+  e.prompt()
+  e.userChoice?.finally(() => {
+    installEvent.value = null
+    showInstall.value = false
+  })
+}
+
+function onInstallPrompt(e: Event) {
+  e.preventDefault()
+  installEvent.value = e
+  showInstall.value = true
+}
+
+onMounted(() => {
+  window.addEventListener('beforeinstallprompt', onInstallPrompt)
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeinstallprompt', onInstallPrompt)
+})
 </script>
 
 <template>
   <div class="home">
-    <div class="bg-glow" aria-hidden="true"></div>
     <header class="top">
       <div class="brand">
         <div class="logo">叠</div>
         <div>
-          <h1>叠播</h1>
-          <p>一路出画面 · 一路出弹幕和声音</p>
+          <h1>叠播 <span class="ver">v1.3</span></h1>
+          <p>A 的弹幕，盖到 B 的画面上</p>
         </div>
       </div>
-      <button class="ghost" @click="settingsOpen = true">
-        {{ store.loggedIn ? '已登录' : '设置' }}
-      </button>
+      <div class="top-actions">
+        <button v-if="showInstall" class="ghost small" @click="install">安装</button>
+        <button class="ghost small" @click="openSettings('account')">
+          {{ store.loggedIn ? store.account.name || '已登录' : '设置' }}
+        </button>
+      </div>
     </header>
 
     <main class="body scroll-y">
-      <section v-if="store.combos.length" class="combos">
-        <h2>我的组合</h2>
+      <!-- 我的组合 -->
+      <section v-if="store.combos.length" class="section">
+        <div class="section-head">
+          <h2>我的组合</h2>
+          <span>点一下直接开播</span>
+        </div>
         <div class="combo-row">
-          <div v-for="(c, i) in store.combos" :key="c.a + '-' + c.b" class="combo">
-            <button class="combo-main" @click="startCombo(c)">
-              <span class="badge a">A</span>
-              <span class="t">{{ c.aTitle || c.a }}</span>
-              <span class="badge b">B</span>
-              <span class="t">{{ c.bTitle || c.b }}</span>
+          <div v-for="(c, i) in store.combos" :key="`${c.aRoomId}-${c.bRoomId}`" class="combo">
+            <button class="combo-main" @click="onCombo(c)">
+              <div class="combo-line">
+                <span class="badge a">A</span>
+                <span class="combo-text">{{ c.aTitle || c.aInput }}</span>
+              </div>
+              <div class="combo-line">
+                <span class="badge b">B</span>
+                <span class="combo-text">{{ c.bTitle || c.bInput }}</span>
+              </div>
+              <small v-if="c.aAnchor || c.bAnchor">{{ c.aAnchor }} / {{ c.bAnchor }}</small>
             </button>
             <button class="combo-del" title="删除" @click="deleteCombo(i)">×</button>
           </div>
         </div>
       </section>
 
+      <!-- 两个房间 -->
       <section class="inputs">
         <div class="card">
           <div class="card-head">
             <span class="badge a">A</span>
             <div class="card-title">
               <strong>主直播间</strong>
-              <small>出弹幕和声音（在这里发弹幕）</small>
+              <small>出弹幕和声音，发弹幕也发到这里</small>
             </div>
           </div>
-          <input
-            v-model="store.a.input"
-            placeholder="房间号或直播间链接"
-            inputmode="numeric"
-            @blur="resolvePreview('a')"
-          />
-          <p class="slot-status" :class="{ err: store.a.state === 'error', ok: store.a.liveStatus === 1 && store.a.state === 'ready' }">
+          <div class="input-wrap">
+            <input
+              v-model="store.a.input"
+              placeholder="房间号或 live.bilibili.com 链接"
+              inputmode="numeric"
+              @keydown.enter="resolvePreview('a')"
+            />
+            <button v-if="store.a.input" class="clear" title="清空" @click="clearSlot('a')">×</button>
+            <button class="go" :disabled="store.a.state === 'loading'" @click="resolvePreview('a')">
+              {{ store.a.state === 'loading' ? '…' : '检测' }}
+            </button>
+          </div>
+          <div v-if="store.a.state === 'ready'" class="preview">
+            <img
+              v-if="store.a.cover"
+              :src="store.a.cover"
+              referrerpolicy="no-referrer"
+              loading="lazy"
+              alt=""
+            />
+            <div v-else class="cover-empty">LIVE</div>
+            <div class="preview-info">
+              <strong>{{ store.a.title }}</strong>
+              <span class="meta">
+                <em>{{ liveText(store.a.liveStatus) }}</em>
+                <span v-if="store.a.uname">{{ store.a.uname }}</span>
+                <span v-if="store.a.online">{{ formatCount(store.a.online) }}人气</span>
+                <span v-if="store.a.areaName">{{ store.a.areaName }}</span>
+              </span>
+            </div>
+          </div>
+          <p
+            class="slot-status"
+            :class="{ err: store.a.state === 'error' || (store.a.error && store.a.state === 'ready'), ok: store.a.liveStatus === 1 && store.a.state === 'ready' }"
+          >
             {{ slotLabel(store.a) }}
           </p>
         </div>
@@ -76,49 +177,93 @@ function slotLabel(s: SlotState): string {
             <span class="badge b">B</span>
             <div class="card-title">
               <strong>画面直播间</strong>
-              <small>只出画面（找比赛画面的那路）</small>
+              <small>找比赛画面的那一路，只出画面</small>
             </div>
           </div>
-          <input
-            v-model="store.b.input"
-            placeholder="房间号或直播间链接"
-            inputmode="numeric"
-            @blur="resolvePreview('b')"
-          />
-          <p class="slot-status" :class="{ err: store.b.state === 'error', ok: store.b.liveStatus === 1 && store.b.state === 'ready' }">
+          <div class="input-wrap">
+            <input
+              v-model="store.b.input"
+              placeholder="房间号或 live.bilibili.com 链接"
+              inputmode="numeric"
+              @keydown.enter="resolvePreview('b')"
+            />
+            <button v-if="store.b.input" class="clear" title="清空" @click="clearSlot('b')">×</button>
+            <button class="go" :disabled="store.b.state === 'loading'" @click="resolvePreview('b')">
+              {{ store.b.state === 'loading' ? '…' : '检测' }}
+            </button>
+          </div>
+          <div v-if="store.b.state === 'ready'" class="preview">
+            <img
+              v-if="store.b.cover"
+              :src="store.b.cover"
+              referrerpolicy="no-referrer"
+              loading="lazy"
+              alt=""
+            />
+            <div v-else class="cover-empty">LIVE</div>
+            <div class="preview-info">
+              <strong>{{ store.b.title }}</strong>
+              <span class="meta">
+                <em>{{ liveText(store.b.liveStatus) }}</em>
+                <span v-if="store.b.uname">{{ store.b.uname }}</span>
+                <span v-if="store.b.online">{{ formatCount(store.b.online) }}人气</span>
+                <span v-if="store.b.areaName">{{ store.b.areaName }}</span>
+              </span>
+            </div>
+          </div>
+          <p
+            class="slot-status"
+            :class="{ err: store.b.state === 'error' || (store.b.error && store.b.state === 'ready'), ok: store.b.liveStatus === 1 && store.b.state === 'ready' }"
+          >
             {{ slotLabel(store.b) }}
           </p>
         </div>
       </section>
 
       <p v-if="store.startError" class="error">{{ store.startError }}</p>
+      <p v-if="netStatus.mode === 'unknown' && netStatus.lastError" class="error">
+        接口不可用：{{ netStatus.lastError }}
+      </p>
 
-      <button class="primary start" :disabled="store.starting" @click="startSession">
+      <button class="primary start" :disabled="!canStart" @click="startSession">
         <span v-if="store.starting" class="spinner"></span>
         {{ store.starting ? '正在解析…' : '开始叠播' }}
       </button>
+      <p v-if="store.a.state === 'ready' && store.b.state === 'ready' && !canStart && !store.starting" class="hint">
+        有一个房间当前未开播，开播后即可叠播
+      </p>
 
-      <section v-if="store.recent.length" class="recent">
-        <h2>最近看过（A 路）</h2>
+      <!-- 最近 -->
+      <section v-if="store.recent.length" class="section">
+        <div class="section-head">
+          <h2>最近看过</h2>
+          <span>点一下填到空的输入框</span>
+        </div>
         <div class="recent-row">
           <button v-for="r in store.recent" :key="r.roomId" class="recent-item" @click="useRecent(r)">
-            <span class="t">{{ r.title || r.roomId }}</span>
-            <small>{{ r.uname }}</small>
+            <span class="t">{{ r.title || r.input }}</span>
+            <small>{{ r.uname || r.roomId }}</small>
           </button>
         </div>
       </section>
+
+      <footer class="foot">
+        <span class="mode" :class="netStatus.mode">
+          {{
+            netStatus.mode === 'direct'
+              ? '直连 B 站'
+              : netStatus.mode === 'relay'
+                ? '中转模式'
+                : netStatus.lastError
+                  ? '接口异常'
+                  : '准备中'
+          }}
+        </span>
+        <span>看直播不用登录 · 发弹幕需要扫码</span>
+      </footer>
     </main>
 
-    <Teleport to="body">
-      <div v-if="settingsOpen" class="mask" @click.self="settingsOpen = false">
-        <div class="sheet">
-          <p class="sheet-hint">在直播间里也能打开完整设置（账号 / 弹幕 / 声音 / 画面）。</p>
-          <p v-if="store.loggedIn" class="sheet-ok">✓ 已登录 B 站，可以发弹幕</p>
-          <p v-else class="sheet-dim">还没登录：看直播不用登录，发弹幕需要扫码。</p>
-          <button class="primary" @click="settingsOpen = false">知道了</button>
-        </div>
-      </div>
-    </Teleport>
+    <SettingsDrawer ref="drawer" />
   </div>
 </template>
 
@@ -133,10 +278,6 @@ function slotLabel(s: SlotState): string {
     radial-gradient(1200px 500px at 80% -10%, rgba(92, 140, 255, 0.16), transparent 60%),
     radial-gradient(900px 420px at 0% 110%, rgba(255, 184, 77, 0.1), transparent 60%),
     var(--bg);
-}
-
-.bg-glow {
-  pointer-events: none;
 }
 
 .top {
@@ -171,10 +312,27 @@ function slotLabel(s: SlotState): string {
   font-size: 22px;
 }
 
+.ver {
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--text-dim);
+  vertical-align: middle;
+}
+
 .top p {
   margin: 2px 0 0;
   color: var(--text-dim);
   font-size: 12px;
+}
+
+.top-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.ghost.small {
+  padding: 8px 13px;
+  font-size: 13px;
 }
 
 .body {
@@ -182,17 +340,30 @@ function slotLabel(s: SlotState): string {
   width: 100%;
   max-width: 980px;
   margin: 0 auto;
-  padding: 10px 22px calc(32px + var(--safe-bottom));
+  padding: 8px 22px calc(32px + var(--safe-bottom));
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
 }
 
-h2 {
+.section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.section-head h2 {
   font-size: 14px;
   color: var(--text-dim);
-  margin: 0 0 10px;
+  margin: 0;
   font-weight: 600;
+}
+
+.section-head span {
+  font-size: 11px;
+  color: var(--text-dim);
+  opacity: 0.7;
 }
 
 /* 组合 */
@@ -215,26 +386,41 @@ h2 {
 
 .combo-main {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 5px;
   background: none;
   border: none;
   color: var(--text);
-  padding: 12px 34px 12px 12px;
+  padding: 11px 38px 11px 12px;
   cursor: pointer;
-  max-width: 340px;
+  min-width: 210px;
+  max-width: 300px;
+  text-align: left;
 }
 
 .combo-main:active {
   transform: scale(0.98);
 }
 
-.combo-main .t {
+.combo-line {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.combo-text {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 110px;
   font-size: 13px;
+}
+
+.combo-main small {
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .combo-del {
@@ -290,7 +476,7 @@ h2 {
   display: grid;
   place-items: center;
   font-weight: 700;
-  font-size: 14px;
+  font-size: 13px;
   color: #fff;
   flex: 0 0 auto;
 }
@@ -303,8 +489,15 @@ h2 {
   background: linear-gradient(135deg, #5b8cff, #7c5bff);
 }
 
-.card input {
-  width: 100%;
+.input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input-wrap input {
+  flex: 1;
+  min-width: 0;
   background: var(--bg2);
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -314,8 +507,95 @@ h2 {
   outline: none;
 }
 
-.card input:focus {
+.input-wrap input:focus {
   border-color: rgba(91, 140, 255, 0.55);
+}
+
+.clear {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: var(--surface2);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 16px;
+  flex: 0 0 auto;
+}
+
+.go {
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface2);
+  color: var(--text);
+  padding: 0 14px;
+  cursor: pointer;
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+
+.go:disabled {
+  opacity: 0.5;
+}
+
+/* 房间预览 */
+.preview {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  padding: 8px;
+  background: var(--bg2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.preview img,
+.cover-empty {
+  width: 92px;
+  aspect-ratio: 16 / 9;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--surface2);
+  flex: 0 0 auto;
+}
+
+.cover-empty {
+  display: grid;
+  place-items: center;
+  color: var(--text-dim);
+  font-size: 11px;
+  letter-spacing: 2px;
+}
+
+.preview-info {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  justify-content: center;
+}
+
+.preview-info strong {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.meta em {
+  font-style: normal;
+  color: var(--ok);
 }
 
 .slot-status {
@@ -346,6 +626,13 @@ h2 {
 .error {
   color: var(--danger);
   font-size: 13px;
+  margin: 0;
+  text-align: center;
+}
+
+.hint {
+  color: var(--text-dim);
+  font-size: 12px;
   margin: 0;
   text-align: center;
 }
@@ -390,43 +677,36 @@ h2 {
   font-size: 11px;
 }
 
-/* 简易设置提示 */
-.mask {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.55);
-  display: grid;
-  place-items: end center;
-  z-index: 60;
-}
-
-.sheet {
-  background: var(--surface);
-  border-radius: 18px 18px 0 0;
-  padding: 20px 20px calc(20px + var(--safe-bottom));
-  width: min(560px, 100%);
+.foot {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
   gap: 10px;
-  animation: fadeUp 0.22s ease;
-}
-
-.sheet-hint {
-  margin: 0;
   color: var(--text-dim);
-  font-size: 13px;
+  font-size: 11px;
+  padding-top: 6px;
 }
 
-.sheet-ok {
-  margin: 0;
+.mode {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+
+.mode.direct {
   color: var(--ok);
-  font-size: 14px;
+  border-color: rgba(74, 222, 128, 0.35);
 }
 
-.sheet-dim {
-  margin: 0;
-  color: var(--text-dim);
-  font-size: 14px;
+.mode.relay {
+  color: var(--accent2);
+  border-color: rgba(255, 184, 77, 0.35);
+}
+
+.mode.none {
+  color: var(--danger);
+  border-color: rgba(255, 90, 95, 0.4);
 }
 
 /* PC 大屏 */
