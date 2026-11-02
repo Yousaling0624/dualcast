@@ -1697,12 +1697,17 @@ onBeforeUnmount(() => {
   transition: transform 0.08s linear;
 }
 
+/* 小窗「全屏」是铺满画面区域；手机边缘有返回手势，留一圈空隙更好框选裁切 */
 .mini.expanded {
-  inset: 0;
-  width: 100% !important;
-  height: 100% !important;
-  border-radius: 0;
-  border: none;
+  top: 14px;
+  bottom: 14px;
+  left: calc(14px + var(--safe-left));
+  right: calc(14px + var(--safe-right));
+  width: auto !important;
+  height: auto !important;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
   cursor: default;
   z-index: 11;
 }
