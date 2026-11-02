@@ -4,7 +4,10 @@
 > - GitHub Actions → **https://yousaling0624.github.io/dualcast/**
 > - Cloudflare Pages → **https://sanlu.yousaling.dpdns.org**（备用：`https://sanlu.pages.dev`）
 >
-> Cloudflare 版本同时提供同源的 `/api/*` 与 `/stream/*` 中转。
+> 默认中转已经迁到 **EdgeOne 海外区**：**https://relay.yousaling.dpdns.org**
+> （国内直连，不需要 ICP 备案；实测比 Cloudflare 直连快 5～10 倍）。
+> Cloudflare Pages 仍然保留同源的 `/api/*` 与 `/stream/*` 中转作为备用。
+> EdgeOne 的部署、TXT/CNAME 和 SSL 配置见 [EDGEONE.md](./EDGEONE.md)。
 
 ## 方式一：Wrangler 登录后一键部署（推荐）
 

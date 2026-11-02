@@ -806,8 +806,8 @@ defineOptions({ name: 'SettingsDrawer' })
                 不可用：线上地址必须是 https://，且 <code>/api/live/room/v1/Room/room_init?id=6</code> 能返回 JSON
               </p>
               <p class="dim small">
-                项目自带的中转：{{ defaultRelay() }}。也可以把仓库里的 deno/proxy.ts 部署到 Deno Deploy，
-                填它给你的地址。中转只转发 B 站接口和直播流，不改变你的网络出口。
+                项目自带的中转：{{ defaultRelay() }}（EdgeOne）。也可以填自建地址；
+                中转只转发 B 站接口和直播流，不改变你的网络出口。
               </p>
             </section>
 
@@ -840,7 +840,7 @@ defineOptions({ name: 'SettingsDrawer' })
                 </a>
                 <a class="link-btn" href="https://sanlu.yousaling.dpdns.org" target="_blank" rel="noreferrer">
                   <AppIcon name="link" :size="16" />
-                  Cloudflare
+                  Cloudflare 备用
                 </a>
               </div>
 

@@ -1,3 +1,8 @@
 name = "sanlu"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-01-01"
+
+# 让 Functions 尽量跑在离 B 站源站近的机房；否则默认在离用户近的机房，
+# 从欧美回源 B 站会多出 1~3 秒（国内用户体感就是“中转很卡”）。
+[placement]
+mode = "smart"

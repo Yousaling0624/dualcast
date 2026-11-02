@@ -8,7 +8,8 @@
  * 所以这里的策略是：
  *   1. 先试浏览器直连（部分接口/部分网络环境可通，而且没有隐私成本）；
  *   2. 直连被风控（HTTP 403/412 或 code -352/-412）时，自动走中转；
- *   3. 中转地址可在设置里改，默认用项目已有的 Cloudflare 中转。
+ *   3. 中转地址可在设置里改，默认用项目已有的 EdgeOne 海外区中转
+ *      （Cloudflare Pages 仍然保留，作为备用）。
  *
  * 直连能做的事（不经过中转）：
  *   - 直播弹幕 WebSocket（不受 CORS 限制）；
@@ -26,10 +27,10 @@ const HOSTS: Record<Bucket, string> = {
   bili: 'https://api.bilibili.com',
 }
 
-/** 项目自带的 Cloudflare Pages 中转；构建时可被 VITE_RELAY_URL 覆盖 */
+/** 项目自带的 EdgeOne 海外区中转；构建时可被 VITE_RELAY_URL 覆盖 */
 const ENV = ((import.meta as any).env || {}) as { VITE_RELAY_URL?: string }
 const DEFAULT_RELAY = (
-  ENV.VITE_RELAY_URL || 'https://sanlu.yousaling.dpdns.org'
+  ENV.VITE_RELAY_URL || 'https://relay.yousaling.dpdns.org'
 ).replace(/\/+$/, '')
 
 const RELAY_KEY = 'dc_relay_base'

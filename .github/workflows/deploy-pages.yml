@@ -44,8 +44,8 @@ jobs:
         env:
           # 项目站点固定部署在 https://<user>.github.io/<repo>/
           VITE_BASE: "/${{ github.event.repository.name }}/"
-          # 可在仓库 Settings → Variables 覆盖中转地址；不设置则用默认 Cloudflare 中转
-          VITE_RELAY_URL: "${{ vars.VITE_RELAY_URL || 'https://sanlu.yousaling.dpdns.org' }}"
+          # 可在仓库 Settings → Variables 覆盖中转地址；不设置则用默认 EdgeOne 中转
+          VITE_RELAY_URL: "${{ vars.VITE_RELAY_URL || 'https://relay.yousaling.dpdns.org' }}"
         run: npm run build
 
       - name: Prepare Pages artifact

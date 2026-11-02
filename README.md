@@ -64,7 +64,12 @@ Android 版：`cd DualLive && ./gradlew assembleDebug`（产出 `app/build/outpu
 | buvid 指纹 `finger/spi` | ✅ 尝试直连 |
 | 房间信息 / 播放地址 / 扫码登录 / 发弹幕 | 先直连；被 CORS/风控拦截自动走中转 |
 
-默认中转为项目已有的 Cloudflare Pages 服务 `https://sanlu.yousaling.dpdns.org`，也可在 **设置 → 中转** 里换成自建地址（CORS 允许 `*`）。中转代码在 [`sanlu-pwa/functions/`](./sanlu-pwa/functions/)，可直接部署到 Cloudflare Pages。
+默认中转为项目已有的 EdgeOne 海外区服务 `https://relay.yousaling.dpdns.org`（国内直连比 Cloudflare Pages 快 5～10 倍），也可在 **设置 → 中转** 里换成自建地址（CORS 允许 `*`）。中转代码有两套：
+
+- [`sanlu-pwa/edgeone/`](./sanlu-pwa/edgeone/)：EdgeOne Makers 边缘函数（当前默认）；
+- [`sanlu-pwa/functions/`](./sanlu-pwa/functions/)：Cloudflare Pages Functions（备用）。
+
+Cloudflare 备用站点 `https://sanlu.yousaling.dpdns.org` 仍然保留。
 
 ## 仓库结构
 

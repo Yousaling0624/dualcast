@@ -1,6 +1,8 @@
 node_modules/
 dist/
 .wrangler/
+.edgeone/
 .dev.vars
 *.local
+*.zip
 .DS_Store

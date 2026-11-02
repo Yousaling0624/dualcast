@@ -4,7 +4,8 @@
 
 - GitHub Pages：https://yousaling0624.github.io/dualcast/
 - 备用 Cloudflare Pages：https://sanlu.yousaling.dpdns.org
-- 技术栈：Vite 6 + Vue 3 + TypeScript、mpegts.js / hls.js、Canvas 弹幕、WebSocket 弹幕、Cloudflare Pages Functions 中转
+- 默认中转：https://relay.yousaling.dpdns.org（EdgeOne 海外区）
+- 技术栈：Vite 6 + Vue 3 + TypeScript、mpegts.js / hls.js、Canvas 弹幕、WebSocket 弹幕、EdgeOne Makers / Cloudflare Pages Functions 中转
 
 ## 功能
 
@@ -74,9 +75,9 @@ B 站直播网关按 `Origin` 白名单拦截浏览器请求，非 `*.bilibili.c
 3. **POST（发弹幕、退出登录）只走中转**，因为需要 `Cookie` 头；
 4. 弹幕 WebSocket、直播 CDN 拉流、buvid 指纹尽量直连，不经过中转。
 
-默认中转：`https://sanlu.yousaling.dpdns.org`（Cloudflare Pages Functions，CORS `*`）。构建时可用 `VITE_RELAY_URL` 覆盖，运行时可在 **设置 → 中转** 修改或关闭。
+默认中转：`https://relay.yousaling.dpdns.org`（EdgeOne Makers 海外区，CORS `*`）。Cloudflare Pages 的 `https://sanlu.yousaling.dpdns.org` 保留为备用。构建时可用 `VITE_RELAY_URL` 覆盖，运行时可在 **设置 → 中转** 修改或关闭。
 
-中转的 `functions/api/[[path]].ts`：
+EdgeOne 中转在 [`edgeone/`](./edgeone/)，端点与域名配置见 [EDGEONE.md](./EDGEONE.md)。Cloudflare 备用中转的 `functions/api/[[path]].ts`：
 
 - 先走 `fetch()`；被 B 站按 TLS 指纹风控（403/412/-352）时自动改用 `cloudflare:sockets` 手写 HTTP/1.1；
 - 扫码 `poll` 的 `Set-Cookie` 会解析成 `cookie_string` / `cookies` 放进 JSON，浏览器才能拿到登录态；
@@ -119,6 +120,11 @@ npm run deploy          # 构建并发布到 Pages 项目 sanlu
 ```
 
 CI 环境可用 `CLOUDFLARE_API_TOKEN` 代替 `wrangler login`。
+
+### 中转（EdgeOne）
+
+当前默认中转跑在 EdgeOne Makers 海外区，域名 `https://relay.yousaling.dpdns.org`，不经过 ICP 备案。
+源码在 [`edgeone/`](./edgeone/)，重新部署和自定义域名的 TXT/CNAME 配置见 [EDGEONE.md](./EDGEONE.md)。
 
 `functions/` 会随 Pages 一起部署，提供 `/api/*` 与 `/stream/*`；通过自定义域访问时中转与页面同源（pages.dev 会调用自定义域中转）。
 
