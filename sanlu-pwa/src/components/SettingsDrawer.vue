@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import QRCode from 'qrcode'
 import {
   finishLogin,
@@ -7,6 +7,7 @@ import {
   nudgeOffset,
   resetOffset,
   setCommentary,
+  setOffset,
   setQuality,
   setVolume,
   store,
@@ -19,8 +20,18 @@ import {
   probeRelay,
   setRelayBase,
 } from '../lib/net'
+import AppIcon from './AppIcon.vue'
 
 type Tab = 'account' | 'danmaku' | 'mix' | 'video' | 'relay' | 'about'
+
+const TABS = [
+  { key: 'account', label: '账号', icon: 'user' },
+  { key: 'danmaku', label: '弹幕', icon: 'danmaku' },
+  { key: 'mix', label: '混音', icon: 'tune' },
+  { key: 'video', label: '画面', icon: 'quality' },
+  { key: 'relay', label: '中转', icon: 'link' },
+  { key: 'about', label: '关于', icon: 'sparkles' },
+] as const
 
 const visible = ref(false)
 const tab = ref<Tab>('account')
@@ -65,6 +76,10 @@ watch(tab, (t) => {
   if (t === 'relay') relayBase.value = getRelayBase()
 })
 
+watch(visible, (v) => {
+  document.body.style.overflow = v ? 'hidden' : ''
+})
+
 async function startQr() {
   stopPoll()
   pollFails = 0
@@ -75,7 +90,11 @@ async function startQr() {
     const qr = await qrGenerate()
     qrKey = qr.qrcodeKey
     if (qrCanvas.value) {
-      await QRCode.toCanvas(qrCanvas.value, qr.imageUrl, { width: 204, margin: 1 })
+      await QRCode.toCanvas(qrCanvas.value, qr.imageUrl, {
+        width: 204,
+        margin: 1,
+        color: { dark: '#201d19', light: '#fffdf9' },
+      })
     }
     qrState.value = 'waiting'
     pollTimer = window.setInterval(poll, 2000)
@@ -183,6 +202,34 @@ async function testRelay() {
   relayStatus.value = ok ? 'ok' : 'fail'
 }
 
+/* 混音 */
+const lastVol = { a: 0.85, b: 1 }
+
+const offsetLabel = computed(() => {
+  const o = store.sessionOffset
+  if (!o) return '两路同步'
+  return o > 0 ? `A 晚 ${o} ms` : `B 晚 ${-o} ms`
+})
+
+const offsetValue = computed({
+  get: () => store.sessionOffset,
+  set: (v: number | string) => setOffset(Number(v)),
+})
+
+function pct(which: 'a' | 'b'): number {
+  return Math.round(store.sessionVolumes[which] * 100)
+}
+
+function toggleMute(which: 'a' | 'b') {
+  const v = store.sessionVolumes[which]
+  if (v > 0) {
+    lastVol[which] = v
+    setVolume(which, 0)
+  } else {
+    setVolume(which, lastVol[which] || 0.85)
+  }
+}
+
 function only(which: 'a' | 'b') {
   setVolume('a', which === 'a' ? 1 : 0)
   setVolume('b', which === 'b' ? 1 : 0)
@@ -193,348 +240,622 @@ function both() {
   setVolume('b', 1)
 }
 
-onBeforeUnmount(stopPoll)
+function relayModeText(): string {
+  if (netStatus.mode === 'direct') return '浏览器直连'
+  if (netStatus.mode === 'relay') return '中转'
+  if (netStatus.lastError) return '接口不可用'
+  return '尚未探测'
+}
+
+function onKey(e: KeyboardEvent) {
+  if (e.key === 'Escape' && visible.value) close()
+}
+
+onMounted(() => window.addEventListener('keydown', onKey))
+onBeforeUnmount(() => {
+  stopPoll()
+  window.removeEventListener('keydown', onKey)
+  document.body.style.overflow = ''
+})
 defineOptions({ name: 'SettingsDrawer' })
 </script>
 
 <template>
   <Teleport to="body">
-    <div v-if="visible" class="mask" @click.self="close">
-      <div class="sheet">
-        <header class="tabs">
-          <button
-            v-for="t in (['account', 'danmaku', 'mix', 'video', 'relay', 'about'] as const)"
-            :key="t"
-            class="tab"
-            :class="{ on: tab === t }"
-            @click="tab = t"
-          >
-            {{
-              t === 'account'
-                ? '账号'
-                : t === 'danmaku'
-                  ? '弹幕'
-                  : t === 'mix'
-                    ? '混音'
-                    : t === 'video'
-                      ? '画面'
-                      : t === 'relay'
-                        ? '中转'
-                        : '关于'
-            }}
-          </button>
-          <button class="close" @click="close">×</button>
-        </header>
+    <Transition name="sheet">
+      <div v-if="visible" class="mask" @click.self="close">
+        <div class="sheet" role="dialog" aria-modal="true" aria-label="设置">
+          <div class="grabber"></div>
 
-        <!-- 账号 -->
-        <section v-if="tab === 'account'" class="pane">
-          <template v-if="store.loggedIn">
-            <div class="account-card">
-              <img v-if="store.account.avatar" :src="store.account.avatar" referrerpolicy="no-referrer" alt="" />
-              <div v-else class="avatar-empty">B</div>
-              <div class="account-info">
-                <strong>{{ store.account.name || '已登录' }}</strong>
-                <small>
-                  UID {{ store.account.mid || '—' }}
-                  <template v-if="store.account.level"> · LV{{ store.account.level }}</template>
-                </small>
-              </div>
+          <header class="sheet-head">
+            <div>
+              <h2>设置</h2>
+              <p>账号、弹幕、混音与播放</p>
             </div>
-            <p class="ok">✓ 已登录，可以发弹幕、+1、回复</p>
-            <div class="segs wide">
-              <button @click="doLogout">退出登录</button>
-            </div>
-          </template>
-          <template v-else>
-            <p class="dim">用 B 站 App 扫码登录。看直播不用登录，发弹幕才需要。</p>
-            <div class="qr-box">
-              <canvas v-show="qrState === 'waiting' || qrState === 'scanned'" ref="qrCanvas"></canvas>
-              <div v-if="qrState === 'loading'" class="spinner big"></div>
-              <div v-if="qrState === 'scanned'" class="qr-tip dim-tip">已扫码，请在手机上确认</div>
-              <div v-if="qrState === 'expired'" class="qr-tip dim-tip">
-                二维码过期了
-                <button class="ghost" @click="startQr">刷新</button>
-              </div>
-              <div v-if="qrState === 'error'" class="qr-tip dim-tip">
-                {{ qrError }}
-                <button class="ghost" @click="startQr">重试</button>
-              </div>
-            </div>
-
-            <details class="manual">
-              <summary>手机不方便扫码？手动粘贴 Cookie</summary>
-              <p class="dim">
-                电脑浏览器登录 bilibili.com → F12 → Application → Cookies，把
-                SESSDATA、bili_jct、DedeUserID 拼成 <code>k=v; k=v</code> 粘进来。
-              </p>
-              <textarea v-model="cookieText" rows="3" placeholder="SESSDATA=...; bili_jct=...; DedeUserID=..."></textarea>
-              <p v-if="manualError" class="err-text">{{ manualError }}</p>
-              <button class="ghost" :disabled="!cookieText.trim() || manualBusy" @click="saveCookie">
-                {{ manualBusy ? '校验中…' : '保存 Cookie' }}
-              </button>
-            </details>
-          </template>
-        </section>
-
-        <!-- 弹幕 -->
-        <section v-else-if="tab === 'danmaku'" class="pane">
-          <label class="row-item">
-            <span>显示弹幕</span>
-            <input type="checkbox" v-model="store.settings.danmaku.enabled" />
-          </label>
-          <label class="row-item">
-            <span>显示昵称</span>
-            <input type="checkbox" v-model="store.settings.danmaku.showName" />
-          </label>
-          <label class="row-item">
-            <span>加粗</span>
-            <input type="checkbox" v-model="store.settings.danmaku.bold" />
-          </label>
-          <div class="row-item">
-            <span>样式</span>
-            <div class="segs">
-              <button
-                v-for="s in (['outline', 'shadow', 'plain'] as const)"
-                :key="s"
-                :class="{ on: store.settings.danmaku.style === s }"
-                @click="store.settings.danmaku.style = s"
-              >
-                {{ s === 'outline' ? '描边' : s === 'shadow' ? '阴影' : '纯色' }}
-              </button>
-            </div>
-          </div>
-          <div class="row-item">
-            <span>字号</span>
-            <div class="segs">
-              <button
-                v-for="s in [0.8, 1, 1.25, 1.5]"
-                :key="s"
-                :class="{ on: Math.abs(store.settings.danmaku.fontScale - s) < 0.01 }"
-                @click="store.settings.danmaku.fontScale = s"
-              >
-                {{ s === 0.8 ? '小' : s === 1 ? '中' : s === 1.25 ? '大' : '特大' }}
-              </button>
-            </div>
-          </div>
-          <div class="row-item">
-            <span>不透明度</span>
-            <input type="range" min="0.2" max="1" step="0.05" v-model.number="store.settings.danmaku.alpha" />
-          </div>
-          <div class="row-item">
-            <span>速度</span>
-            <div class="segs">
-              <button
-                v-for="s in [0.6, 1, 1.6]"
-                :key="s"
-                :class="{ on: Math.abs(store.settings.danmaku.speed - s) < 0.01 }"
-                @click="store.settings.danmaku.speed = s"
-              >
-                {{ s === 0.6 ? '慢' : s === 1 ? '正常' : '快' }}
-              </button>
-            </div>
-          </div>
-          <div class="row-item">
-            <span>显示区域</span>
-            <div class="segs">
-              <button
-                v-for="(label, val) in AREA_LABEL"
-                :key="val"
-                :class="{ on: Math.abs(store.settings.danmaku.area - Number(val)) < 0.01 }"
-                @click="store.settings.danmaku.area = Number(val)"
-              >
-                {{ label }}
-              </button>
-            </div>
-          </div>
-          <div class="row-item col">
-            <span>屏蔽词（逗号或空格分隔）</span>
-            <textarea v-model="blockedText" rows="2" placeholder="比如：抽奖, 活动, 关注"></textarea>
-          </div>
-        </section>
-
-        <!-- 混音 -->
-        <section v-else-if="tab === 'mix'" class="pane">
-          <p class="dim">
-            A 出声音和弹幕，B 出画面。两路解说有先后时，用下面的按钮把 A 的声音挪一挪；
-            音量配比会按当前房间组合记住。
-          </p>
-          <div class="vol">
-            <span>A 声音</span>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              :value="store.sessionVolumes.a"
-              @input="setVolume('a', Number(($event.target as HTMLInputElement).value))"
-            />
-            <em>{{ Math.round(store.sessionVolumes.a * 100) }}%</em>
-          </div>
-          <div class="vol">
-            <span>B 声音</span>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              :value="store.sessionVolumes.b"
-              @input="setVolume('b', Number(($event.target as HTMLInputElement).value))"
-            />
-            <em>{{ Math.round(store.sessionVolumes.b * 100) }}%</em>
-          </div>
-          <div class="segs wide">
-            <button @click="only('a')">只听 A</button>
-            <button @click="only('b')">只听 B</button>
-            <button @click="both">默认配比</button>
-          </div>
-          <div class="offset">
-            <div class="offset-head">
-              <span>A 相对 B 的延迟</span>
-              <em>{{ store.sessionOffset > 0 ? '+' : '' }}{{ store.sessionOffset }} ms</em>
-            </div>
-            <div class="segs wide">
-              <button @click="nudgeOffset(-500)">-500</button>
-              <button @click="nudgeOffset(-100)">-100</button>
-              <button @click="nudgeOffset(100)">+100</button>
-              <button @click="nudgeOffset(500)">+500</button>
-              <button @click="resetOffset">归零</button>
-            </div>
-            <p class="dim small">正数让 A 晚一点；负数改为让 B 晚一点（效果是 A 相对提前）。偏移按房间组合记忆。</p>
-          </div>
-        </section>
-
-        <!-- 画面 -->
-        <section v-else-if="tab === 'video'" class="pane">
-          <div class="row-item">
-            <span>A 路清晰度</span>
-            <div class="segs wrap">
-              <button
-                v-for="q in store.a.acceptQn"
-                :key="q.qn"
-                :class="{ on: q.qn === store.a.qn }"
-                :disabled="store.qualitySwitching"
-                @click="setQuality('a', q.qn)"
-              >
-                {{ q.desc }}
-              </button>
-              <span v-if="!store.a.acceptQn.length" class="dim">开播后可选</span>
-            </div>
-          </div>
-          <div class="row-item">
-            <span>B 路清晰度</span>
-            <div class="segs wrap">
-              <button
-                v-for="q in store.b.acceptQn"
-                :key="q.qn"
-                :class="{ on: q.qn === store.b.qn }"
-                :disabled="store.qualitySwitching"
-                @click="setQuality('b', q.qn)"
-              >
-                {{ q.desc }}
-              </button>
-              <span v-if="!store.b.acceptQn.length" class="dim">开播后可选</span>
-            </div>
-          </div>
-          <div class="row-item col">
-            <span>下次开播默认清晰度（A / B 通用）</span>
-            <div class="segs wrap">
-              <button
-                v-for="qn in [10000, 400, 250, 150]"
-                :key="qn"
-                :class="{ on: store.settings.video.defaultQn === qn }"
-                @click="store.settings.video.defaultQn = qn"
-              >
-                {{ qnLabel(qn) }}
-              </button>
-            </div>
-          </div>
-          <p class="dim small">当前 B 路：{{ qnLabel(store.b.qn) }}。原画码率高，移动网络建议超清。</p>
-          <div class="row-item">
-            <span>画面缩放</span>
-            <div class="segs">
-              <button
-                v-for="s in (['fit', 'crop', 'fill'] as const)"
-                :key="s"
-                :class="{ on: store.settings.video.scale === s }"
-                @click="store.settings.video.scale = s"
-              >
-                {{ SCALE_LABEL[s] }}
-              </button>
-            </div>
-          </div>
-          <label class="row-item">
-            <span>A 解说小窗</span>
-            <input
-              type="checkbox"
-              :checked="store.settings.commentaryWindow"
-              @change="setCommentary(($event.target as HTMLInputElement).checked)"
-            />
-          </label>
-        </section>
-
-        <!-- 中转 -->
-        <section v-else-if="tab === 'relay'" class="pane">
-          <p class="dim">
-            B 站网关会拒绝非 bilibili.com 来源的浏览器请求（CORS Origin 白名单），
-            所以纯静态网页无法直接调用房间/播放接口。这里会自动直连优先，被拦后走中转。
-          </p>
-          <div class="mode-card" :class="netStatus.mode">
-            <strong>
-              当前：{{
-                netStatus.mode === 'direct'
-                  ? '浏览器直连'
-                  : netStatus.mode === 'relay'
-                    ? '中转'
-                    : netStatus.mode === 'none'
-                      ? '不可用'
-                      : '未探测'
-              }}
-            </strong>
-            <small>{{ netStatus.relay || '尚未建立连接' }}</small>
-          </div>
-          <div class="row-item col">
-            <span>中转地址</span>
-            <input v-model="relayBase" placeholder="https://你的中转.example.com" />
-          </div>
-          <div class="segs wide wrap">
-            <button @click="saveRelay(false)">保存</button>
-            <button @click="saveRelay(true)">用默认</button>
-            <button :disabled="relayStatus === 'testing'" @click="testRelay">
-              {{ relayStatus === 'testing' ? '测试中…' : '测试' }}
+            <button class="close" title="关闭" @click="close">
+              <AppIcon name="close" :size="19" />
             </button>
-            <button @click="disableRelay">只用直连</button>
-          </div>
-          <p v-if="relayStatus === 'ok'" class="ok">✓ 中转可用</p>
-          <p v-if="relayStatus === 'fail'" class="err-text">✗ 不可用：线上地址必须是 https://，且 /api/live/room/v1/Room/room_init?id=6 能返回 JSON</p>
-          <p class="dim small">
-            项目自带的中转：{{
-              defaultRelay()
-            }}。也可以把仓库里的 deno/proxy.ts 部署到 Deno Deploy，填它给你的地址。
-          </p>
-        </section>
+          </header>
 
-        <!-- 关于 -->
-        <section v-else class="pane">
-          <div class="about-logo">叠</div>
-          <h3>叠播 DualCast v1.3</h3>
-          <p class="dim">
-            给「没有比赛画面版权、只能解说」的主播和粉丝：A 房间出弹幕和声音，
-            B 房间出比赛画面，还能像斗鱼一样快速 +1、回复弹幕。
-          </p>
-          <p class="dim small">
-            网页版是静态 PWA，可添加到主屏幕；B 站接口直连被 CORS 拦截时由中转兜底。Android 原生版在仓库 DualLive/。
-          </p>
-          <div class="segs wide wrap">
-            <a class="link-btn" href="https://github.com/Yousaling0624/dualcast" target="_blank" rel="noreferrer">GitHub 仓库</a>
-            <a class="link-btn" :href="`https://yousaling0624.github.io/dualcast/`" target="_blank" rel="noreferrer">网页版地址</a>
+          <nav class="tabs" aria-label="设置分类">
+            <button
+              v-for="t in TABS"
+              :key="t.key"
+              class="tab"
+              :class="{ on: tab === t.key }"
+              @click="tab = t.key"
+            >
+              <AppIcon :name="t.icon" :size="16" />
+              <span>{{ t.label }}</span>
+            </button>
+          </nav>
+
+          <div class="pane scroll-y">
+            <!-- 账号 -->
+            <section v-if="tab === 'account'" class="pane-inner">
+              <template v-if="store.loggedIn">
+                <div class="account-card">
+                  <img
+                    v-if="store.account.avatar"
+                    :src="store.account.avatar"
+                    referrerpolicy="no-referrer"
+                    alt=""
+                  />
+                  <div v-else class="avatar-empty">{{ (store.account.name || 'B').slice(0, 1) }}</div>
+                  <div class="account-info">
+                    <strong>{{ store.account.name || '已登录' }}</strong>
+                    <small>
+                      UID {{ store.account.mid || '—' }}
+                      <template v-if="store.account.level"> · LV{{ store.account.level }}</template>
+                    </small>
+                  </div>
+                  <span class="account-badge"><AppIcon name="check" :size="13" />已登录</span>
+                </div>
+                <p class="dim">可以发弹幕、+1 和回复。看直播本身不需要登录。</p>
+                <button class="btn-outline wide" @click="doLogout">
+                  <AppIcon name="user" :size="16" />
+                  退出登录
+                </button>
+              </template>
+
+              <template v-else>
+                <div class="group">
+                  <div class="group-head">
+                    <div>
+                      <h3>扫码登录</h3>
+                      <p>用 B 站 App 扫一下，看直播不用登录，互动才需要。</p>
+                    </div>
+                    <AppIcon name="user" :size="19" class="group-icon" />
+                  </div>
+
+                  <div class="qr-box">
+                    <canvas v-show="qrState === 'waiting' || qrState === 'scanned'" ref="qrCanvas"></canvas>
+                    <div v-if="qrState === 'loading'" class="qr-tip">
+                      <span class="spinner big"></span>
+                      <small>正在生成二维码…</small>
+                    </div>
+                    <div v-if="qrState === 'scanned'" class="qr-tip qr-overlay">
+                      <span class="qr-ok"><AppIcon name="check" :size="18" /></span>
+                      <small>已扫码，请在手机上确认</small>
+                    </div>
+                    <div v-if="qrState === 'expired'" class="qr-tip">
+                      <small>二维码过期了</small>
+                      <button class="btn-outline" @click="startQr">刷新</button>
+                    </div>
+                    <div v-if="qrState === 'error'" class="qr-tip">
+                      <small>{{ qrError }}</small>
+                      <button class="btn-outline" @click="startQr">重试</button>
+                    </div>
+                  </div>
+                </div>
+
+                <details class="manual">
+                  <summary>手机不方便扫码？手动粘贴 Cookie</summary>
+                  <p class="dim">
+                    电脑浏览器登录 bilibili.com → F12 → Application → Cookies，把
+                    SESSDATA、bili_jct、DedeUserID 拼成 <code>k=v; k=v</code> 粘进来。
+                  </p>
+                  <textarea
+                    v-model="cookieText"
+                    class="field"
+                    rows="3"
+                    placeholder="SESSDATA=...; bili_jct=...; DedeUserID=..."
+                  ></textarea>
+                  <p v-if="manualError" class="err-text">{{ manualError }}</p>
+                  <button
+                    class="btn-outline"
+                    :disabled="!cookieText.trim() || manualBusy"
+                    @click="saveCookie"
+                  >
+                    {{ manualBusy ? '校验中…' : '保存 Cookie' }}
+                  </button>
+                </details>
+              </template>
+            </section>
+
+            <!-- 弹幕 -->
+            <section v-else-if="tab === 'danmaku'" class="pane-inner">
+              <div class="group">
+                <div class="group-head">
+                  <div>
+                    <h3>弹幕显示</h3>
+                    <p>控制画面上的滚动弹幕。</p>
+                  </div>
+                  <AppIcon name="danmaku" :size="19" class="group-icon" />
+                </div>
+
+                <label class="row">
+                  <span class="row-text"><strong>显示弹幕</strong><small>关闭后画面更干净</small></span>
+                  <span class="switch">
+                    <input v-model="store.settings.danmaku.enabled" type="checkbox" />
+                    <span class="track"></span><span class="thumb"></span>
+                  </span>
+                </label>
+                <label class="row">
+                  <span class="row-text"><strong>显示昵称</strong><small>在弹幕前加上发送者</small></span>
+                  <span class="switch">
+                    <input v-model="store.settings.danmaku.showName" type="checkbox" />
+                    <span class="track"></span><span class="thumb"></span>
+                  </span>
+                </label>
+                <label class="row">
+                  <span class="row-text"><strong>加粗</strong><small>更醒目，适合小屏</small></span>
+                  <span class="switch">
+                    <input v-model="store.settings.danmaku.bold" type="checkbox" />
+                    <span class="track"></span><span class="thumb"></span>
+                  </span>
+                </label>
+
+                <div class="row col">
+                  <span class="row-text"><strong>样式</strong></span>
+                  <div class="segs">
+                    <button
+                      v-for="s in (['outline', 'shadow', 'plain'] as const)"
+                      :key="s"
+                      :class="{ on: store.settings.danmaku.style === s }"
+                      @click="store.settings.danmaku.style = s"
+                    >
+                      {{ s === 'outline' ? '描边' : s === 'shadow' ? '阴影' : '纯色' }}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="row col">
+                  <span class="row-text"><strong>字号</strong></span>
+                  <div class="segs">
+                    <button
+                      v-for="s in [0.8, 1, 1.25, 1.5]"
+                      :key="s"
+                      :class="{ on: Math.abs(store.settings.danmaku.fontScale - s) < 0.01 }"
+                      @click="store.settings.danmaku.fontScale = s"
+                    >
+                      {{ s === 0.8 ? '小' : s === 1 ? '中' : s === 1.25 ? '大' : '特大' }}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="row col">
+                  <div class="range-label">
+                    <span class="row-text"><strong>不透明度</strong></span>
+                    <em>{{ Math.round(store.settings.danmaku.alpha * 100) }}%</em>
+                  </div>
+                  <input
+                    v-model.number="store.settings.danmaku.alpha"
+                    type="range"
+                    min="0.2"
+                    max="1"
+                    step="0.05"
+                    :style="{ '--fill': Math.round(store.settings.danmaku.alpha * 100) + '%' }"
+                  />
+                </div>
+
+                <div class="row col">
+                  <span class="row-text"><strong>速度</strong></span>
+                  <div class="segs">
+                    <button
+                      v-for="s in [0.6, 1, 1.6]"
+                      :key="s"
+                      :class="{ on: Math.abs(store.settings.danmaku.speed - s) < 0.01 }"
+                      @click="store.settings.danmaku.speed = s"
+                    >
+                      {{ s === 0.6 ? '慢' : s === 1 ? '正常' : '快' }}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="row col">
+                  <span class="row-text"><strong>显示区域</strong></span>
+                  <div class="segs wrap">
+                    <button
+                      v-for="(label, val) in AREA_LABEL"
+                      :key="val"
+                      :class="{ on: Math.abs(store.settings.danmaku.area - Number(val)) < 0.01 }"
+                      @click="store.settings.danmaku.area = Number(val)"
+                    >
+                      {{ label }}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="row col">
+                  <span class="row-text"><strong>屏蔽词</strong><small>逗号或空格分隔</small></span>
+                  <textarea v-model="blockedText" class="field" rows="2" placeholder="比如：抽奖, 活动, 关注"></textarea>
+                </div>
+              </div>
+
+              <div class="group">
+                <div class="group-head">
+                  <div>
+                    <h3>SC 悬浮窗</h3>
+                    <p>和浏览器脚本一样，在画面左上角浮出醒目留言；全屏也会显示。</p>
+                  </div>
+                  <AppIcon name="sc" :size="19" class="group-icon accent" />
+                </div>
+
+                <label class="row">
+                  <span class="row-text"><strong>显示 SC</strong><small>画面左上角的悬浮卡片</small></span>
+                  <span class="switch">
+                    <input v-model="store.settings.sc.enabled" type="checkbox" />
+                    <span class="track"></span><span class="thumb"></span>
+                  </span>
+                </label>
+                <label class="row">
+                  <span class="row-text"><strong>显示金额</strong><small>在卡片上显示 SC 价格</small></span>
+                  <span class="switch">
+                    <input v-model="store.settings.sc.showPrice" type="checkbox" />
+                    <span class="track"></span><span class="thumb"></span>
+                  </span>
+                </label>
+
+                <div class="row col">
+                  <div class="range-label">
+                    <span class="row-text"><strong>停留时长</strong><small>服务端时长更长时以服务端为准</small></span>
+                    <em>{{ store.settings.sc.duration }}s</em>
+                  </div>
+                  <input
+                    v-model.number="store.settings.sc.duration"
+                    type="range"
+                    min="4"
+                    max="30"
+                    step="1"
+                    :style="{ '--fill': ((store.settings.sc.duration - 4) / 26) * 100 + '%' }"
+                  />
+                </div>
+
+                <div class="row col">
+                  <span class="row-text"><strong>同时显示</strong></span>
+                  <div class="segs">
+                    <button
+                      v-for="n in 5"
+                      :key="n"
+                      :class="{ on: store.settings.sc.max === n }"
+                      @click="store.settings.sc.max = n"
+                    >
+                      {{ n }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <!-- 混音 -->
+            <section v-else-if="tab === 'mix'" class="pane-inner">
+              <div class="group">
+                <div class="group-head">
+                  <div>
+                    <h3>两路音量</h3>
+                    <p>A 出解说和弹幕，B 出比赛画面。音量配比按房间组合记忆。</p>
+                  </div>
+                  <AppIcon name="volume" :size="19" class="group-icon" />
+                </div>
+
+                <div class="channel-card a">
+                  <div class="channel-head">
+                    <span class="channel-letter a">A</span>
+                    <div class="channel-info">
+                      <strong>解说 · 声音与弹幕</strong>
+                      <small>{{ store.a.uname || store.a.title || '主直播间' }}</small>
+                    </div>
+                    <button
+                      class="mini-icon"
+                      :class="{ muted: store.sessionVolumes.a === 0 }"
+                      :title="store.sessionVolumes.a === 0 ? '取消静音' : '静音'"
+                      @click="toggleMute('a')"
+                    >
+                      <AppIcon name="volume" :size="17" />
+                    </button>
+                  </div>
+                  <div class="vol-slider">
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      :value="store.sessionVolumes.a"
+                      :style="{ '--fill': pct('a') + '%' }"
+                      @input="setVolume('a', Number(($event.target as HTMLInputElement).value))"
+                    />
+                    <em>{{ pct('a') }}%</em>
+                  </div>
+                  <div class="channel-foot">
+                    <span>声音 · 弹幕 · SC</span>
+                    <button class="text-btn" @click="only('a')">只听 A</button>
+                  </div>
+                </div>
+
+                <div class="channel-card b">
+                  <div class="channel-head">
+                    <span class="channel-letter b">B</span>
+                    <div class="channel-info">
+                      <strong>画面 · 比赛现场</strong>
+                      <small>{{ store.b.uname || store.b.title || '画面直播间' }}</small>
+                    </div>
+                    <button
+                      class="mini-icon"
+                      :class="{ muted: store.sessionVolumes.b === 0 }"
+                      :title="store.sessionVolumes.b === 0 ? '取消静音' : '静音'"
+                      @click="toggleMute('b')"
+                    >
+                      <AppIcon name="volume" :size="17" />
+                    </button>
+                  </div>
+                  <div class="vol-slider">
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      :value="store.sessionVolumes.b"
+                      :style="{ '--fill': pct('b') + '%' }"
+                      @input="setVolume('b', Number(($event.target as HTMLInputElement).value))"
+                    />
+                    <em>{{ pct('b') }}%</em>
+                  </div>
+                  <div class="channel-foot">
+                    <span>画面 · 现场声</span>
+                    <button class="text-btn" @click="only('b')">只听 B</button>
+                  </div>
+                </div>
+
+                <div class="segs wide">
+                  <button @click="both">默认配比</button>
+                  <button @click="only('a')">只留解说</button>
+                  <button @click="only('b')">只留现场</button>
+                </div>
+              </div>
+
+              <div class="group offset-group">
+                <div class="group-head">
+                  <div>
+                    <h3>延迟校准</h3>
+                    <p>解说比画面快或慢时，在这里把 A 的声音往后或往前挪。</p>
+                  </div>
+                  <AppIcon name="tune" :size="19" class="group-icon accent" />
+                </div>
+
+                <div class="offset-card">
+                  <div class="offset-head">
+                    <span class="offset-kicker">当前偏移</span>
+                    <strong :class="{ zero: !store.sessionOffset }">{{ offsetLabel }}</strong>
+                  </div>
+                  <div class="offset-ends">
+                    <span>← A 提前</span>
+                    <span>A 延后 →</span>
+                  </div>
+                  <input
+                    v-model.number="offsetValue"
+                    class="offset-range"
+                    type="range"
+                    min="-5000"
+                    max="5000"
+                    step="50"
+                    :style="{ '--fill': ((store.sessionOffset + 5000) / 10000) * 100 + '%' }"
+                  />
+                  <div class="offset-scale">
+                    <span>-5s</span>
+                    <span>0</span>
+                    <span>+5s</span>
+                  </div>
+                  <div class="nudge-row">
+                    <button class="chip" @click="nudgeOffset(-500)">-0.5s</button>
+                    <button class="chip" @click="nudgeOffset(-100)">-0.1s</button>
+                    <button class="chip" @click="nudgeOffset(100)">+0.1s</button>
+                    <button class="chip" @click="nudgeOffset(500)">+0.5s</button>
+                    <button class="chip reset" :disabled="!store.sessionOffset" @click="resetOffset">
+                      归零
+                    </button>
+                  </div>
+                </div>
+
+                <p class="dim small">
+                  正数让 A 晚一点，负数让 B 晚一点。调节后会等缓冲跟上，偶尔短暂停顿是正常的。
+                  偏移和音量都会按「A 房间 + B 房间」记住。
+                </p>
+              </div>
+            </section>
+
+            <!-- 画面 -->
+            <section v-else-if="tab === 'video'" class="pane-inner">
+              <div class="group">
+                <div class="group-head">
+                  <div>
+                    <h3>清晰度</h3>
+                    <p>原画码率高，移动网络建议超清。</p>
+                  </div>
+                  <AppIcon name="quality" :size="19" class="group-icon" />
+                </div>
+                <div class="row col">
+                  <span class="row-text"><strong>A 路 · 解说</strong><small>当前 {{ qnLabel(store.a.qn) }}</small></span>
+                  <div class="segs wrap">
+                    <button
+                      v-for="q in store.a.acceptQn"
+                      :key="q.qn"
+                      :class="{ on: q.qn === store.a.qn }"
+                      :disabled="store.qualitySwitching"
+                      @click="setQuality('a', q.qn)"
+                    >
+                      {{ q.desc }}
+                    </button>
+                    <span v-if="!store.a.acceptQn.length" class="dim small">开播后可选</span>
+                  </div>
+                </div>
+                <div class="row col">
+                  <span class="row-text"><strong>B 路 · 画面</strong><small>当前 {{ qnLabel(store.b.qn) }}</small></span>
+                  <div class="segs wrap">
+                    <button
+                      v-for="q in store.b.acceptQn"
+                      :key="q.qn"
+                      :class="{ on: q.qn === store.b.qn }"
+                      :disabled="store.qualitySwitching"
+                      @click="setQuality('b', q.qn)"
+                    >
+                      {{ q.desc }}
+                    </button>
+                    <span v-if="!store.b.acceptQn.length" class="dim small">开播后可选</span>
+                  </div>
+                </div>
+                <div class="row col">
+                  <span class="row-text"><strong>下次开播默认清晰度</strong><small>A / B 通用</small></span>
+                  <div class="segs wrap">
+                    <button
+                      v-for="qn in [10000, 400, 250, 150]"
+                      :key="qn"
+                      :class="{ on: store.settings.video.defaultQn === qn }"
+                      @click="store.settings.video.defaultQn = qn"
+                    >
+                      {{ qnLabel(qn) }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="group">
+                <div class="group-head">
+                  <div>
+                    <h3>画面布局</h3>
+                    <p>只影响 B 路视频的显示方式。</p>
+                  </div>
+                  <AppIcon name="pip" :size="19" class="group-icon" />
+                </div>
+                <div class="row col">
+                  <span class="row-text"><strong>缩放</strong></span>
+                  <div class="segs">
+                    <button
+                      v-for="s in (['fit', 'crop', 'fill'] as const)"
+                      :key="s"
+                      :class="{ on: store.settings.video.scale === s }"
+                      @click="store.settings.video.scale = s"
+                    >
+                      {{ SCALE_LABEL[s] }}
+                    </button>
+                  </div>
+                </div>
+                <label class="row">
+                  <span class="row-text"><strong>A 解说小窗</strong><small>在画面右上角显示 A 路视频</small></span>
+                  <span class="switch">
+                    <input
+                      type="checkbox"
+                      :checked="store.settings.commentaryWindow"
+                      @change="setCommentary(($event.target as HTMLInputElement).checked)"
+                    />
+                    <span class="track"></span><span class="thumb"></span>
+                  </span>
+                </label>
+              </div>
+            </section>
+
+            <!-- 中转 -->
+            <section v-else-if="tab === 'relay'" class="pane-inner">
+              <p class="dim">
+                B 站网关会拒绝非 bilibili.com 来源的浏览器请求（CORS Origin 白名单），
+                所以纯静态网页无法直接调用房间/播放接口。这里会自动直连优先，被拦后走中转。
+              </p>
+
+              <div class="mode-card" :class="[netStatus.mode, { bad: !!netStatus.lastError }]">
+                <span class="mode-dot"></span>
+                <div>
+                  <strong>{{ relayModeText() }}</strong>
+                  <small>{{ netStatus.relay || '尚未建立连接' }}</small>
+                  <small v-if="netStatus.lastError" class="mode-err">{{ netStatus.lastError }}</small>
+                </div>
+              </div>
+
+              <div class="row col">
+                <span class="row-text"><strong>中转地址</strong><small>必须是 https://，末尾不带斜杠</small></span>
+                <div class="field-with-icon">
+                  <AppIcon name="link" :size="16" />
+                  <input v-model="relayBase" class="field" placeholder="https://你的中转.example.com" />
+                </div>
+              </div>
+
+              <div class="segs wide wrap">
+                <button @click="saveRelay(false)">保存</button>
+                <button @click="saveRelay(true)">用默认</button>
+                <button :disabled="relayStatus === 'testing'" @click="testRelay">
+                  <span v-if="relayStatus === 'testing'" class="spinner"></span>
+                  <template v-else>测试</template>
+                </button>
+                <button @click="disableRelay">只用直连</button>
+              </div>
+
+              <p v-if="relayStatus === 'ok'" class="ok">
+                <AppIcon name="check" :size="14" />中转可用
+              </p>
+              <p v-if="relayStatus === 'fail'" class="err-text">
+                <AppIcon name="warning" :size="14" />
+                不可用：线上地址必须是 https://，且 <code>/api/live/room/v1/Room/room_init?id=6</code> 能返回 JSON
+              </p>
+              <p class="dim small">
+                项目自带的中转：{{ defaultRelay() }}。也可以把仓库里的 deno/proxy.ts 部署到 Deno Deploy，
+                填它给你的地址。中转只转发 B 站接口和直播流，不改变你的网络出口。
+              </p>
+            </section>
+
+            <!-- 关于 -->
+            <section v-else class="pane-inner">
+              <div class="about-hero">
+                <div class="about-logo">叠</div>
+                <div>
+                  <h3>叠播 DualCast</h3>
+                  <p>v1.4 · PWA 网页版</p>
+                </div>
+              </div>
+              <p class="dim">
+                给「没有比赛画面版权、只能解说」的主播和粉丝：A 房间出弹幕和声音，
+                B 房间出比赛画面，还能像斗鱼一样快速 +1、回复弹幕，并在画面上看 SC。
+              </p>
+              <p class="dim small">
+                网页版是静态 PWA，可添加到主屏幕；B 站接口直连被 CORS 拦截时由中转兜底。
+                Android 原生版在仓库 DualLive/。
+              </p>
+
+              <div class="links">
+                <a class="link-btn" href="https://github.com/Yousaling0624/dualcast" target="_blank" rel="noreferrer">
+                  <AppIcon name="github" :size="16" />
+                  GitHub 仓库
+                </a>
+                <a class="link-btn" href="https://yousaling0624.github.io/dualcast/" target="_blank" rel="noreferrer">
+                  <AppIcon name="link" :size="16" />
+                  GitHub Pages
+                </a>
+                <a class="link-btn" href="https://sanlu.yousaling.dpdns.org" target="_blank" rel="noreferrer">
+                  <AppIcon name="link" :size="16" />
+                  Cloudflare
+                </a>
+              </div>
+
+              <div class="privacy-card">
+                <AppIcon name="warning" :size="17" />
+                <p>
+                  看直播不登录；发弹幕需要 B 站账号。设置与登录 Cookie 只存在本机浏览器；
+                  需要中转时会随请求转发给 B 站接口。不要在这个设备上登录他人账号。
+                </p>
+              </div>
+            </section>
           </div>
-          <p class="dim small">
-            看直播不登录；发弹幕需要 B 站账号。设置与登录 Cookie 只存在本机浏览器；
-            需要中转时会随请求转发给 B 站接口。
-          </p>
-        </section>
+        </div>
       </div>
-    </div>
+    </Transition>
   </Teleport>
 </template>
 
@@ -542,217 +863,260 @@ defineOptions({ name: 'SettingsDrawer' })
 .mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.58);
+  background: rgba(28, 23, 18, 0.5);
   z-index: 70;
   display: grid;
   place-items: end center;
+  backdrop-filter: blur(3px);
 }
 
 .sheet {
-  background: var(--surface);
-  border-radius: 18px 18px 0 0;
-  width: min(720px, 100%);
-  max-height: 84dvh;
+  position: relative;
+  background: var(--bg-soft);
+  border-radius: 30px 30px 0 0;
+  width: min(760px, 100%);
+  max-height: 88dvh;
   display: flex;
   flex-direction: column;
-  animation: fadeUp 0.22s ease;
+  animation: sheetUp 0.3s cubic-bezier(0.2, 0.85, 0.25, 1);
   padding-bottom: var(--safe-bottom);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  border-bottom: none;
+  box-shadow: 0 -24px 80px rgba(28, 23, 18, 0.28);
+  overflow: hidden;
 }
 
-.tabs {
-  display: flex;
-  gap: 4px;
-  padding: 10px 12px 0;
-  align-items: center;
+.sheet-enter-active,
+.sheet-leave-active {
+  transition: opacity 0.24s ease;
 }
 
-.tab {
-  flex: 1;
-  border: none;
-  background: transparent;
-  color: var(--text-dim);
-  padding: 9px 0;
-  border-radius: 9px 9px 0 0;
-  cursor: pointer;
-  font-size: 13px;
+.sheet-enter-from,
+.sheet-leave-to {
+  opacity: 0;
 }
 
-.tab.on {
-  color: var(--text);
-  background: var(--surface2);
-  font-weight: 600;
+.sheet-enter-active .sheet,
+.sheet-leave-active .sheet {
+  transition: transform 0.28s cubic-bezier(0.2, 0.85, 0.25, 1);
 }
 
-.close {
-  width: 30px;
-  height: 30px;
-  border: none;
-  border-radius: 50%;
-  background: var(--surface2);
-  color: var(--text-dim);
-  cursor: pointer;
+.sheet-enter-from .sheet,
+.sheet-leave-to .sheet {
+  transform: translateY(24px);
+}
+
+@keyframes sheetUp {
+  from {
+    transform: translateY(24px);
+    opacity: 0.7;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.grabber {
+  width: 38px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line-strong);
+  margin: 8px auto 2px;
   flex: 0 0 auto;
 }
 
-.pane {
-  padding: 16px 18px 22px;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 13px;
-}
-
-.dim {
-  color: var(--text-dim);
-  font-size: 13px;
-  margin: 0;
-  line-height: 1.55;
-}
-
-.dim.small {
-  font-size: 11px;
-  opacity: 0.85;
-}
-
-.ok {
-  color: var(--ok);
-  font-size: 13px;
-  margin: 0;
-}
-
-.err-text {
-  color: var(--danger);
-  font-size: 12px;
-  margin: 0;
-  line-height: 1.5;
-}
-
-.account-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 12px;
-}
-
-.account-card img,
-.avatar-empty {
-  width: 52px;
-  height: 52px;
-  border-radius: 50%;
-  object-fit: cover;
-  background: linear-gradient(135deg, #5b8cff, #7c5bff);
-  display: grid;
-  place-items: center;
-  color: #fff;
-  font-weight: 700;
-  font-size: 20px;
-}
-
-.account-info {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-}
-
-.account-info strong {
-  font-size: 15px;
-}
-
-.account-info small {
-  font-size: 11px;
-  color: var(--text-dim);
-}
-
-.qr-box {
-  align-self: center;
-  background: #fff;
-  border-radius: 14px;
-  padding: 10px;
-  min-width: 224px;
-  min-height: 224px;
-  display: grid;
-  place-items: center;
-}
-
-.qr-tip {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-}
-
-.dim-tip {
-  color: #333;
-}
-
-.spinner.big {
-  width: 26px;
-  height: 26px;
-  border-color: #ccc;
-  border-top-color: #5b8cff;
-}
-
-.manual {
-  border-top: 1px solid var(--line);
-  padding-top: 10px;
-}
-
-.manual summary {
-  font-size: 12px;
-  color: var(--text-dim);
-  cursor: pointer;
-  margin-bottom: 8px;
-}
-
-.manual textarea,
-.row-item textarea {
-  width: 100%;
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  color: var(--text);
-  padding: 8px 10px;
-  font-size: 12px;
-  resize: vertical;
-  margin-bottom: 8px;
-  font-family: inherit;
-}
-
-.manual code {
-  color: var(--accent2);
-}
-
-.row-item {
+.sheet-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  font-size: 14px;
+  padding: 10px 20px 12px;
+  flex: 0 0 auto;
 }
 
-.row-item.col {
+.sheet-head h2 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: 24px;
+  font-weight: 550;
+  letter-spacing: -0.015em;
+}
+
+.sheet-head p {
+  margin: 1px 0 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.close {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-dim);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.tabs {
+  display: flex;
+  gap: 5px;
+  padding: 0 16px 12px;
+  overflow-x: auto;
+  flex: 0 0 auto;
+  scrollbar-width: none;
+}
+
+.tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 8px 13px;
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+  transition:
+    background 0.16s ease,
+    color 0.16s ease;
+}
+
+.tab:hover {
+  background: var(--surface-2);
+}
+
+.tab.on {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--accent-strong);
+  box-shadow: var(--shadow-card);
+}
+
+.pane {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 16px 22px;
+}
+
+.pane-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.group {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  padding: 15px 15px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.group-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 2px 10px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+
+.group-head h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.group-head p {
+  margin: 3px 0 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+  max-width: 440px;
+}
+
+.group-icon {
+  color: var(--text-faint);
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.group-icon.accent {
+  color: var(--accent);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 48px;
+  padding: 7px 2px;
+  border-bottom: 1px solid rgba(32, 29, 25, 0.055);
+  font-size: 13.5px;
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+.row.col {
   flex-direction: column;
   align-items: stretch;
+  gap: 8px;
+  padding-top: 10px;
+  padding-bottom: 10px;
 }
 
-.row-item.col > span {
-  margin-bottom: 6px;
+.row-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.row-item input[type='text'],
-.row-item > input:not([type]) {
-  flex: 1;
-  background: var(--bg2);
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  color: var(--text);
-  padding: 9px 11px;
+.row-text strong {
   font-size: 13px;
-  outline: none;
+  font-weight: 550;
+}
+
+.row-text small {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
+.range-label {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.range-label em {
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--accent-strong);
 }
 
 .segs {
@@ -767,98 +1131,529 @@ defineOptions({ name: 'SettingsDrawer' })
 
 .segs.wide {
   justify-content: center;
+  padding-top: 4px;
 }
 
 .segs button {
   border: 1px solid var(--line);
-  background: var(--bg2);
+  background: var(--bg-soft);
   color: var(--text-dim);
   border-radius: 999px;
   padding: 7px 13px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
+  font-weight: 500;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.segs button:hover:not(:disabled) {
+  background: var(--surface-2);
 }
 
 .segs button.on {
-  background: rgba(91, 140, 255, 0.2);
-  border-color: rgba(91, 140, 255, 0.6);
-  color: var(--text);
-  font-weight: 600;
+  background: var(--accent-soft);
+  border-color: rgba(217, 119, 87, 0.35);
+  color: var(--accent-strong);
+  font-weight: 650;
 }
 
 .segs button:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
 }
 
 input[type='range'] {
+  width: 100%;
   flex: 1;
   accent-color: var(--accent);
+  height: 22px;
 }
 
-input[type='checkbox'] {
-  width: 20px;
-  height: 20px;
-  accent-color: var(--accent);
+.field {
+  width: 100%;
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  color: var(--text);
+  padding: 10px 13px;
+  font-size: 13px;
+  outline: none;
+  resize: vertical;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
 }
 
-.vol {
+.field:focus {
+  border-color: rgba(217, 119, 87, 0.55);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+  background: var(--surface);
+}
+
+.field-with-icon {
+  position: relative;
+  display: flex;
+  align-items: center;
+  color: var(--text-faint);
+}
+
+.field-with-icon :deep(.icon) {
+  position: absolute;
+  left: 12px;
+  pointer-events: none;
+}
+
+.field-with-icon .field {
+  padding-left: 36px;
+}
+
+.dim {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin: 0;
+  line-height: 1.6;
+}
+
+.dim.small {
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.ok {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ok);
+  font-size: 12px;
+  margin: 0;
+}
+
+.err-text {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  color: var(--danger);
+  font-size: 12px;
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* 账号 */
+.account-card {
   display: flex;
   align-items: center;
   gap: 12px;
-  font-size: 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  padding: 14px;
+  box-shadow: var(--shadow-card);
 }
 
-.vol span {
-  width: 62px;
+.account-card img,
+.avatar-empty {
+  width: 54px;
+  height: 54px;
+  border-radius: 18px;
+  object-fit: cover;
+  background: linear-gradient(145deg, #8b99df, var(--accent-2));
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-weight: 650;
+  font-size: 21px;
+  flex: 0 0 auto;
 }
 
-.vol em {
-  width: 42px;
-  text-align: right;
-  font-style: normal;
-  color: var(--text-dim);
-  font-size: 12px;
-}
-
-.offset {
+.account-info {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  background: var(--bg2);
+  gap: 3px;
+  min-width: 0;
+  flex: 1;
+}
+
+.account-info strong {
+  font-size: 15px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.account-info small {
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.account-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--ok);
+  background: var(--ok-soft);
+  border-radius: 999px;
+  padding: 4px 8px;
+  flex: 0 0 auto;
+}
+
+.btn-outline {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 11px;
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 10px 16px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.btn-outline.wide {
+  width: 100%;
+}
+
+.btn-outline:disabled {
+  opacity: 0.5;
+}
+
+.qr-box {
+  align-self: center;
+  position: relative;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  padding: 12px;
+  min-width: 228px;
+  min-height: 228px;
+  display: grid;
+  place-items: center;
+  margin: 10px 0 4px;
+  box-shadow: var(--shadow-card);
+}
+
+.qr-tip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+  padding: 0 10px;
+}
+
+.qr-overlay {
+  position: absolute;
+  inset: 12px;
+  background: rgba(255, 253, 249, 0.92);
+  border-radius: 14px;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+}
+
+.qr-ok {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--ok-soft);
+  color: var(--ok);
+  display: grid;
+  place-items: center;
+}
+
+.spinner.big {
+  width: 28px;
+  height: 28px;
+  border-color: var(--surface-3);
+  border-right-color: var(--accent);
+}
+
+.manual {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+
+.manual summary {
+  font-size: 12px;
+  color: var(--text-dim);
+  cursor: pointer;
+  margin-bottom: 9px;
+}
+
+.manual .dim {
+  margin-bottom: 8px;
+}
+
+.manual code {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 4px;
+  padding: 0 3px;
+}
+
+.manual .field {
+  margin-bottom: 8px;
+}
+
+/* 混音 */
+.channel-card {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--bg-soft);
+  padding: 11px 12px 9px;
+  margin: 6px 0;
+}
+
+.channel-card.a {
+  border-color: rgba(217, 119, 87, 0.22);
+  background: linear-gradient(135deg, rgba(255, 253, 249, 0.9), rgba(255, 243, 235, 0.72));
+}
+
+.channel-card.b {
+  border-color: rgba(102, 121, 207, 0.2);
+  background: linear-gradient(135deg, rgba(255, 253, 249, 0.9), rgba(240, 242, 252, 0.72));
+}
+
+.channel-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.channel-letter {
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 700;
+  color: #fff;
+  flex: 0 0 auto;
+}
+
+.channel-letter.a {
+  background: linear-gradient(140deg, #e28a6d, var(--accent));
+}
+
+.channel-letter.b {
+  background: linear-gradient(140deg, #8b99df, var(--accent-2));
+}
+
+.channel-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.channel-info strong {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.channel-info small {
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mini-icon {
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-dim);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.mini-icon.muted {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: transparent;
+}
+
+.vol-slider {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 7px;
+}
+
+.vol-slider em {
+  width: 38px;
+  text-align: right;
+  font-style: normal;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+
+.channel-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 1px;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.text-btn {
+  border: none;
+  background: none;
+  color: var(--accent-strong);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 0;
+}
+
+.offset-group {
+  gap: 4px;
+}
+
+.offset-card {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--bg-soft);
+  padding: 13px;
+  margin-top: 4px;
 }
 
 .offset-head {
   display: flex;
+  align-items: baseline;
   justify-content: space-between;
-  font-size: 13px;
+  gap: 10px;
 }
 
-.offset-head em {
-  font-style: normal;
-  color: var(--accent2);
+.offset-kicker {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 650;
 }
 
+.offset-head strong {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 550;
+  color: var(--accent-strong);
+}
+
+.offset-head strong.zero {
+  color: var(--ok);
+}
+
+.offset-ends {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  font-size: 9.5px;
+  color: var(--text-faint);
+}
+
+.offset-range {
+  margin: 0;
+  width: 100%;
+}
+
+.offset-scale {
+  display: flex;
+  justify-content: space-between;
+  margin-top: -3px;
+  font-size: 9px;
+  color: var(--text-faint);
+}
+
+.nudge-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 9px;
+  flex-wrap: wrap;
+}
+
+.chip {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-dim);
+  padding: 5px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chip.reset {
+  margin-left: auto;
+  color: var(--accent-strong);
+  border-color: rgba(217, 119, 87, 0.25);
+}
+
+.chip:disabled {
+  opacity: 0.4;
+}
+
+/* 中转 */
 .mode-card {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
-  background: var(--bg2);
+  align-items: flex-start;
+  gap: 10px;
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 11px 13px;
+  border-radius: 18px;
+  padding: 13px;
+}
+
+.mode-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  margin-top: 5px;
+  flex: 0 0 auto;
+}
+
+.mode-card.direct .mode-dot {
+  background: var(--ok);
+  box-shadow: 0 0 0 4px var(--ok-soft);
+}
+
+.mode-card.relay .mode-dot {
+  background: var(--gold);
+  box-shadow: 0 0 0 4px var(--gold-soft);
+}
+
+.mode-card.none .mode-dot,
+.mode-card.bad .mode-dot {
+  background: var(--danger);
+  box-shadow: 0 0 0 4px var(--danger-soft);
+}
+
+.mode-card > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .mode-card strong {
-  font-size: 14px;
-}
-
-.mode-card small {
-  font-size: 11px;
-  color: var(--text-dim);
-  word-break: break-all;
+  font-size: 13px;
 }
 
 .mode-card.direct strong {
@@ -866,45 +1661,188 @@ input[type='checkbox'] {
 }
 
 .mode-card.relay strong {
-  color: var(--accent2);
+  color: var(--gold);
 }
 
-.mode-card.none strong {
+.mode-card.none strong,
+.mode-card.bad strong {
   color: var(--danger);
 }
 
-.about-logo {
-  width: 54px;
-  height: 54px;
-  border-radius: 14px;
-  background: linear-gradient(135deg, #5b8cff, #7c5bff);
-  display: grid;
-  place-items: center;
-  font-size: 26px;
-  font-weight: 700;
-  color: #fff;
+.mode-card small {
+  font-size: 10.5px;
+  color: var(--text-faint);
+  word-break: break-all;
 }
 
-.about-logo + h3 {
+.mode-card small.mode-err {
+  color: var(--danger);
+}
+
+/* 关于 */
+.about-hero {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 4px 2px 2px;
+}
+
+.about-logo {
+  width: 56px;
+  height: 56px;
+  border-radius: 19px;
+  background: linear-gradient(145deg, #e28a6d, var(--accent) 55%, #c46545);
+  display: grid;
+  place-items: center;
+  font-family: var(--font-display);
+  font-size: 27px;
+  font-weight: 700;
+  color: #fff9f4;
+  box-shadow: 0 10px 24px rgba(184, 93, 63, 0.22);
+  flex: 0 0 auto;
+}
+
+.about-hero h3 {
   margin: 0;
-  font-size: 18px;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 550;
+}
+
+.about-hero p {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
 }
 
 .link-btn {
-  display: inline-block;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--line);
-  background: var(--bg2);
+  background: var(--surface);
   color: var(--text-dim);
   border-radius: 999px;
-  padding: 7px 13px;
+  padding: 8px 13px;
   cursor: pointer;
-  font-size: 13px;
+  font-size: 12px;
   text-decoration: none;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease;
 }
 
-@media (max-width: 420px) {
+.link-btn:hover {
+  color: var(--text);
+  border-color: var(--text-faint);
+}
+
+.privacy-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: var(--surface-2);
+  border-radius: 16px;
+  padding: 11px 13px;
+  color: var(--text-dim);
+}
+
+.privacy-card :deep(.icon) {
+  color: var(--gold);
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.privacy-card p {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+@media (min-width: 720px) {
+  .mask {
+    place-items: center;
+  }
+
+  .sheet {
+    border-radius: 30px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.6);
+    max-height: 86dvh;
+  }
+
+  .grabber {
+    display: none;
+  }
+
+  .sheet-head {
+    padding-top: 18px;
+  }
+
+  .pane {
+    padding-bottom: 24px;
+  }
+}
+
+@media (max-width: 560px) {
+  .tabs {
+    flex-wrap: wrap;
+    gap: 6px;
+    overflow: visible;
+  }
+
   .tab {
-    font-size: 12px;
+    flex: 1 1 calc(33.333% - 8px);
+    justify-content: center;
+    padding: 8px 6px;
+  }
+}
+
+@media (max-width: 520px) {
+  .sheet-head {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .sheet-head h2 {
+    font-size: 22px;
+  }
+
+  .tabs {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .pane {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .group {
+    border-radius: 20px;
+    padding-left: 13px;
+    padding-right: 13px;
+  }
+
+  .row {
+    gap: 10px;
+  }
+
+  .segs {
+    flex-wrap: wrap;
+  }
+
+  .nudge-row {
+    gap: 5px;
+  }
+
+  .chip {
+    padding: 5px 9px;
   }
 }
 </style>

@@ -35,6 +35,12 @@ export interface ChatMsg {
   /** 粉丝牌名 */
   medal?: string
   medalLevel?: number
+  /** SC 发送者头像 */
+  avatar?: string
+  /** SC 服务端给的展示时长（毫秒） */
+  scDuration?: number
+  /** SC 唯一 id，用于去重 / 删除 */
+  scId?: string
   self?: boolean
   /** 进房时补拉的历史弹幕 */
   history?: boolean
@@ -416,11 +422,21 @@ export class DanmakuClient {
         const d = cmd.data || {}
         const text = String(d.message || '').trim()
         if (!text) return
+        const user = d.user_info || {}
+        const rawTime = Number(d.time || 0)
+        // 老版本给秒，新版本给毫秒；统一成毫秒后交给悬浮窗
+        const scDuration = rawTime > 0 ? (rawTime < 1000 ? rawTime * 1000 : rawTime) : undefined
+        const scId = String(d.id || '')
         this.emit({
           kind: 'sc',
           text,
-          uname: String(d.user_info?.uname || ''),
+          uname: String(user.uname || ''),
+          uid: Number(user.uid || 0),
+          avatar: String(user.face || ''),
           price: Number(d.price || 0),
+          scId: scId || undefined,
+          scDuration,
+          dmid: scId ? `sc-${scId}` : undefined,
         })
       } else if (fn === 'USER_TOAST_MSG' || fn === 'USER_TOAST_MSG_V2' || fn === 'GUARD_BUY') {
         const d = cmd.data || {}

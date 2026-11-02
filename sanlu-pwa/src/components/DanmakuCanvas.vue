@@ -75,6 +75,8 @@ function spawn() {
   while (feedBuffer.length) {
     const m = feedBuffer.shift()!
     if (!d.enabled || !m.text || m.history) continue
+    // SC 由画面上的 SuperChatOverlay 负责，不再挤在弹幕轨道里
+    if (m.kind === 'sc') continue
     const lower = m.text.toLowerCase()
     if (d.blocked.some((w) => w && lower.includes(w.toLowerCase()))) continue
 
@@ -83,7 +85,7 @@ function spawn() {
     c.font = fontCss(d.fontScale, d.bold)
     const w = c.measureText(text).width
     const color = colorOf(m)
-    const sticky = m.kind === 'sc' || m.kind === 'guard'
+    const sticky = m.kind === 'guard'
 
     if (sticky) {
       let lane = 0

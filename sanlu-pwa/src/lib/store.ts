@@ -88,6 +88,13 @@ export interface Settings {
   }
   volume: { a: number; b: number }
   commentaryWindow: boolean
+  /** 全屏视频上方的醒目留言（SC）悬浮窗 */
+  sc: {
+    enabled: boolean
+    duration: number
+    max: number
+    showPrice: boolean
+  }
 }
 
 interface RoomProfile {
@@ -127,6 +134,7 @@ const DEFAULT_SETTINGS: Settings = {
   video: { scale: 'fit', defaultQn: 250 },
   volume: { a: 0.85, b: 1 },
   commentaryWindow: false,
+  sc: { enabled: true, duration: 8, max: 3, showPrice: true },
 }
 
 function emptySlot(): SlotState {
@@ -190,6 +198,9 @@ function loadSettings(): Settings {
     s.volume.b = Number(raw.volume.b ?? s.volume.b)
   }
   if (typeof raw.commentaryWindow === 'boolean') s.commentaryWindow = raw.commentaryWindow
+  if (raw.sc && typeof raw.sc === 'object') Object.assign(s.sc, raw.sc)
+  s.sc.duration = Math.max(4, Math.min(60, Number(s.sc.duration) || 8))
+  s.sc.max = Math.max(1, Math.min(5, Number(s.sc.max) || 3))
   return s
 }
 
@@ -244,6 +255,8 @@ export const store = reactive({
   a: emptySlot(),
   b: emptySlot(),
   messages: [] as ChatMsg[],
+  /** 新 SC 的独立队列，画面上的 SC 悬浮窗消费它，不依赖聊天室滚动位置 */
+  scFeed: [] as ChatMsg[],
   viewer: 0,
   danmakuStatus: 'idle' as DanmakuStatus,
   danmakuError: '',
@@ -335,7 +348,13 @@ function pushMessage(m: ChatMsg) {
   if (hasDmid(m.dmid)) return
   const msg: ChatMsg = { ...m, seq: m.seq || 900000000 + ++pushSeq }
   store.messages.push(msg)
-  if (!msg.history) feedBuffer.push(msg)
+  if (!msg.history) {
+    feedBuffer.push(msg)
+    if (msg.kind === 'sc') {
+      store.scFeed.push(msg)
+      if (store.scFeed.length > 40) store.scFeed.splice(0, store.scFeed.length - 40)
+    }
+  }
   trimMessages()
 }
 
@@ -589,6 +608,7 @@ function beginSession() {
   store.a.blocked = false
   store.b.blocked = false
   store.messages = []
+  store.scFeed = []
   feedBuffer.length = 0
   applyRoomProfile()
   store.commentaryOn = store.settings.commentaryWindow
@@ -606,6 +626,7 @@ function beginSession() {
 function connectDanmaku() {
   danmaku.stop()
   store.messages = []
+  store.scFeed = []
   feedBuffer.length = 0
   store.danmakuStatus = 'connecting'
   store.danmakuError = ''
@@ -686,6 +707,8 @@ export function swap() {
     const va = store.sessionVolumes.a
     store.sessionVolumes.a = store.sessionVolumes.b
     store.sessionVolumes.b = va
+    // 偏移是「A 相对 B」的量，互换后方向要反过来，否则听感会对不上
+    store.sessionOffset = -store.sessionOffset
     destroyPlayers()
     attachStreams()
     applyVolumes()
@@ -742,6 +765,7 @@ export function exitSession() {
   slotStreams.b = { flv: [], hls: [] }
   store.view = 'home'
   store.messages = []
+  store.scFeed = []
   store.playing = true
   store.a.blocked = false
   store.b.blocked = false
@@ -793,16 +817,22 @@ export function setVolume(which: 'a' | 'b', v: number) {
   saveRoomProfileSoon()
 }
 
-export function nudgeOffset(deltaMs: number) {
-  store.sessionOffset = Math.max(-5000, Math.min(5000, store.sessionOffset + deltaMs))
+export function setOffset(ms: number) {
+  store.sessionOffset = Math.max(-5000, Math.min(5000, Math.round(ms)))
   applyOffset()
   saveRoomProfileSoon()
 }
 
+export function nudgeOffset(deltaMs: number) {
+  setOffset(store.sessionOffset + deltaMs)
+}
+
 export function resetOffset() {
-  store.sessionOffset = 0
-  applyOffset()
-  saveRoomProfileSoon()
+  setOffset(0)
+}
+
+export function toggleSc() {
+  store.settings.sc.enabled = !store.settings.sc.enabled
 }
 
 export function setCommentary(on: boolean) {

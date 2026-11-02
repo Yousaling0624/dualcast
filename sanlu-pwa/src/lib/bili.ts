@@ -22,6 +22,7 @@ import { clearWbiCache, signParams } from './wbi'
 const QN_DESC: Record<number, string> = {
   30000: '杜比',
   20000: '4K',
+  15000: '2K',
   10000: '原画',
   401: '蓝光',
   400: '蓝光',
