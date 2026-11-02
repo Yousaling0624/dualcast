@@ -10,6 +10,7 @@ import {
   exitSession,
   plusOne,
   reconnect,
+  reportMessage,
   replyInputLimit,
   resumePlayback,
   retryDanmaku,
@@ -23,6 +24,17 @@ import {
   viewerLabel,
 } from '../lib/store'
 import type { ChatMsg } from '../lib/danmaku'
+import type { ReportResult } from '../lib/bili'
+import {
+  cropTransform,
+  defaultMiniWidth,
+  isUsableCrop,
+  normalizeCrop,
+  proportionalResize,
+  type CropRect,
+  type MiniBox,
+  type MiniCorner,
+} from '../lib/layout'
 import DanmakuCanvas from './DanmakuCanvas.vue'
 import ChatPanel from './ChatPanel.vue'
 import SettingsDrawer from './SettingsDrawer.vue'
@@ -47,11 +59,19 @@ let collapsedBeforeFullscreen = false
 /* A 解说小窗 */
 const miniOn = ref(store.commentaryOn)
 const miniExpanded = ref(false)
-const miniPos = ref({ x: 10, y: 62 })
-const miniW = ref(240)
+const miniPos = ref({ x: 16, y: 70 })
+const miniW = ref(300)
 const miniZoom = ref(1)
 const miniPan = ref({ x: 0, y: 0 })
 const miniH = computed(() => (miniW.value * 9) / 16)
+
+/* 小窗框选裁切 */
+const miniCrop = ref<CropRect | null>(null)
+const cropMode = ref(false)
+const cropDraft = ref<CropRect | null>(null)
+let cropStart = { x: 0, y: 0 }
+let cropping = false
+const miniCropStyle = computed(() => cropTransform(miniCrop.value))
 
 const pointers = new Map<number, { x: number; y: number }>()
 let dragging = false
@@ -59,13 +79,58 @@ let dragStart = { x: 0, y: 0, px: 0, py: 0, wx: 0, wy: 0 }
 let pinchDist = 0
 let pinchZoom = 1
 let resizing = false
-let resizeStart = { x: 0, w: 0 }
+let resizeStart: {
+  corner: MiniCorner
+  box: MiniBox
+  bounds: { width: number; height: number }
+  startX: number
+  startY: number
+} | null = null
 
-/* 点画面上的弹幕，浮出 +1 / 回复 */
+interface DmHit {
+  msg: ChatMsg
+  x: number
+  y: number
+  w: number
+  h: number
+  bottom: number
+}
+
+interface QuickAnchor {
+  left: number
+  top: number
+  below: boolean
+  /** 画面上下空间有限，让快捷条内部滚动而不是被裁掉 */
+  maxHeight: number
+}
+
+/* 点 / 悬停画面上的弹幕，浮出 +1 / 回复 / 举报 */
 const quickTarget = ref<ChatMsg | null>(null)
+const quickAnchor = ref<QuickAnchor | null>(null)
+const quickMode = ref<'click' | 'hover'>('click')
 const quickReply = ref(false)
 const quickText = ref('')
 const quickHint = ref('')
+const quickReport = ref(false)
+const quickReporting = ref(false)
+const quickReportReason = ref(6)
+const quickReportHint = ref('')
+const quickReportDone = ref(false)
+
+const REPORT_REASONS = [
+  { value: 2, label: '色情低俗' },
+  { value: 4, label: '人身攻击' },
+  { value: 6, label: '垃圾广告' },
+  { value: 7, label: '引战' },
+  { value: 9, label: '恶意刷屏' },
+  { value: 11, label: '其他' },
+]
+
+const hoverCapable =
+  typeof window !== 'undefined' && window.matchMedia('(hover: hover) and (pointer: fine)').matches
+let hoverOpenTimer: number | null = null
+let hoverCloseTimer: number | null = null
+let hoverCandidate = { seq: 0, x: 0, y: 0 }
 
 const qnLabel = computed(() => {
   const slot = store.b
@@ -80,11 +145,12 @@ const videoFit = computed(() => {
 
 const statusLabel = computed(() => {
   const s = store.danmakuStatus
-  if (s === 'open') return viewerLabel() ? `A 弹幕 · ${viewerLabel()}` : 'A 弹幕已连接'
-  if (s === 'reconnecting') return 'A 弹幕重连中…'
-  if (s === 'connecting') return 'A 弹幕连接中…'
-  if (s === 'failed') return 'A 弹幕连接失败'
-  return 'A 弹幕未连接'
+  const extra = store.sources.length ? ` + ${store.sources.length} 路` : ''
+  if (s === 'open') return viewerLabel() ? `A 弹幕 · ${viewerLabel()}${extra}` : `A 弹幕已连接${extra}`
+  if (s === 'reconnecting') return `A 弹幕重连中…${extra}`
+  if (s === 'connecting') return `A 弹幕连接中…${extra}`
+  if (s === 'failed') return `A 弹幕连接失败${extra}`
+  return `A 弹幕未连接${extra}`
 })
 
 const quickLimit = computed(() => (quickTarget.value ? replyInputLimit(quickTarget.value) : 20))
@@ -106,13 +172,14 @@ function reveal() {
 
 function onZoneTap(e: PointerEvent) {
   const t = e.target as HTMLElement
-  if (t.closest('button, .mini, .quality, .quickbar, input, .topbar, .bottombar')) return
+  if (t.closest('button, .mini, .quality, .quickbar, input, .topbar, .bottombar, .crop-layer, .crop-actions'))
+    return
   const el = zoneEl.value
   if (el && dmCanvas.value) {
     const rect = el.getBoundingClientRect()
-    const hit = dmCanvas.value.hitTest(e.clientX - rect.left, e.clientY - rect.top)
+    const hit = dmCanvas.value.freezeAt(e.clientX - rect.left, e.clientY - rect.top)
     if (hit) {
-      openQuick(hit)
+      openQuick(hit, 'click')
       return
     }
   }
@@ -123,8 +190,79 @@ function onZoneTap(e: PointerEvent) {
   reveal()
 }
 
-function onMouseMove() {
-  if (window.matchMedia('(hover: hover)').matches) reveal()
+function clearHoverOpen() {
+  if (hoverOpenTimer) {
+    clearTimeout(hoverOpenTimer)
+    hoverOpenTimer = null
+  }
+  hoverCandidate.seq = 0
+}
+
+function cancelHoverClose() {
+  if (hoverCloseTimer) {
+    clearTimeout(hoverCloseTimer)
+    hoverCloseTimer = null
+  }
+}
+
+function scheduleHoverClose() {
+  if (quickMode.value !== 'hover' || hoverCloseTimer) return
+  hoverCloseTimer = window.setTimeout(() => {
+    hoverCloseTimer = null
+    closeQuick()
+  }, 550)
+}
+
+function pointerInRect(e: PointerEvent, hit: DmHit | null): boolean {
+  if (!hit) return false
+  const zone = zoneEl.value
+  if (!zone) return false
+  const rect = zone.getBoundingClientRect()
+  const x = e.clientX - rect.left
+  const y = e.clientY - rect.top
+  return x >= hit.x - 10 && x <= hit.x + hit.w + 10 && y >= hit.y - 8 && y <= hit.bottom + 8
+}
+
+/**
+ * 电脑端鼠标悬停 320ms 触发：冻结这条弹幕并浮出快捷条。
+ * 鼠标移开后 550ms 自动恢复飘动；触屏走点击逻辑。
+ */
+function onZoneMove(e: PointerEvent) {
+  reveal()
+  if (!hoverCapable || e.pointerType !== 'mouse') return
+  const t = e.target as HTMLElement
+  if (t.closest('.quickbar')) {
+    cancelHoverClose()
+    return
+  }
+  if (t.closest('.topbar, .bottombar, .mini, .quality, button, input')) return
+  if (quickTarget.value) {
+    const hit = dmCanvas.value?.rectFor(quickTarget.value.seq) || null
+    if (pointerInRect(e, hit)) cancelHoverClose()
+    else scheduleHoverClose()
+    return
+  }
+  if (!store.settings.danmaku.enabled) return
+  const el = zoneEl.value
+  if (!el || !dmCanvas.value) return
+  const rect = el.getBoundingClientRect()
+  const x = e.clientX - rect.left
+  const y = e.clientY - rect.top
+  const hit = dmCanvas.value.hitRect(x, y)
+  if (!hit) {
+    clearHoverOpen()
+    return
+  }
+  if (hoverCandidate.seq === hit.msg.seq) return
+  clearHoverOpen()
+  hoverCandidate = { seq: hit.msg.seq, x, y }
+  hoverOpenTimer = window.setTimeout(() => {
+    hoverOpenTimer = null
+    if (quickTarget.value) return
+    const frozen = dmCanvas.value?.freezeSeq(hoverCandidate.seq)
+    if (frozen) openQuick(frozen, 'hover')
+    hoverCandidate.seq = 0
+  }, 320)
 }
 
 function goBack() {
@@ -202,6 +340,8 @@ function toggleMiniExpand() {
   if (!miniExpanded.value) {
     miniZoom.value = 1
     miniPan.value = { x: 0, y: 0 }
+    cropMode.value = false
+    cropDraft.value = null
   }
   reveal()
 }
@@ -289,42 +429,190 @@ function onMiniDoubleClick() {
   miniPan.value = { x: 0, y: 0 }
 }
 
-function onResizeDown(e: PointerEvent) {
+function onResizeDown(e: PointerEvent, corner: MiniCorner) {
   e.stopPropagation()
+  e.preventDefault()
+  const zone = zoneEl.value
+  if (!zone) return
   ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+  const rect = zone.getBoundingClientRect()
   resizing = true
-  resizeStart = { x: e.clientX, w: miniW.value }
+  resizeStart = {
+    corner,
+    box: { right: miniPos.value.x, top: miniPos.value.y, width: miniW.value, height: miniH.value },
+    bounds: { width: rect.width, height: rect.height },
+    startX: e.clientX,
+    startY: e.clientY,
+  }
 }
 
 function onResizeMove(e: PointerEvent) {
-  if (!resizing) return
-  const zone = zoneEl.value
-  if (!zone) return
-  const rect = zone.getBoundingClientRect()
-  miniW.value = Math.max(120, Math.min(rect.width - 16, resizeStart.w + (e.clientX - resizeStart.x)))
+  if (!resizing || !resizeStart) return
+  const next = proportionalResize(
+    resizeStart.box,
+    resizeStart.corner,
+    e.clientX - resizeStart.startX,
+    e.clientY - resizeStart.startY,
+    resizeStart.bounds
+  )
+  miniW.value = Math.round(next.width)
+  miniPos.value = { x: Math.round(next.right), y: Math.round(next.top) }
   clampMiniPos()
 }
 
 function onResizeUp() {
   resizing = false
+  resizeStart = null
 }
 
-function openQuick(m: ChatMsg) {
+/* ---------- 小窗框选裁切 ---------- */
+
+function toggleCropMode() {
+  cropMode.value = !cropMode.value
+  if (cropMode.value) {
+    cropDraft.value = miniCrop.value ? { ...miniCrop.value } : { x: 0, y: 0, w: 1, h: 1 }
+  } else {
+    cropDraft.value = null
+  }
+  reveal()
+}
+
+function onCropDown(e: PointerEvent) {
+  const el = e.currentTarget as HTMLElement
+  const rect = el.getBoundingClientRect()
+  el.setPointerCapture(e.pointerId)
+  cropStart = {
+    x: Math.max(0, Math.min(rect.width, e.clientX - rect.left)),
+    y: Math.max(0, Math.min(rect.height, e.clientY - rect.top)),
+  }
+  cropping = true
+  cropDraft.value = normalizeCrop(cropStart.x, cropStart.y, cropStart.x, cropStart.y, rect.width, rect.height)
+}
+
+function onCropMove(e: PointerEvent) {
+  if (!cropping) return
+  const el = e.currentTarget as HTMLElement
+  const rect = el.getBoundingClientRect()
+  const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
+  const y = Math.max(0, Math.min(rect.height, e.clientY - rect.top))
+  cropDraft.value = normalizeCrop(cropStart.x, cropStart.y, x, y, rect.width, rect.height)
+}
+
+function onCropUp() {
+  cropping = false
+  if (!isUsableCrop(cropDraft.value)) {
+    cropDraft.value = miniCrop.value ? { ...miniCrop.value } : { x: 0, y: 0, w: 1, h: 1 }
+  }
+}
+
+function applyCrop() {
+  const draft = cropDraft.value
+  if (isUsableCrop(draft)) {
+    const full = draft.w >= 0.999 && draft.h >= 0.999
+    miniCrop.value = full ? null : { ...draft }
+  }
+  cropMode.value = false
+  cropDraft.value = null
+  miniZoom.value = 1
+  miniPan.value = { x: 0, y: 0 }
+  reveal()
+}
+
+/** 只重置预览框，点「应用裁切」后才真正生效；「取消」能保留原来的裁切 */
+function resetCrop() {
+  cropDraft.value = { x: 0, y: 0, w: 1, h: 1 }
+}
+
+function cancelCrop() {
+  cropMode.value = false
+  cropDraft.value = null
+  reveal()
+}
+
+function openQuick(hit: DmHit, mode: 'click' | 'hover') {
+  const m = hit.msg
   if (m.kind !== 'danmu') return
+  cancelHoverClose()
+  clearHoverOpen()
   quickTarget.value = m
+  quickMode.value = mode
   quickReply.value = false
   quickText.value = ''
   quickHint.value = ''
+  quickReport.value = false
+  quickReporting.value = false
+  quickReportHint.value = ''
+  quickReportDone.value = false
   clearSendError()
+
+  const zone = zoneEl.value
+  const rect = zone?.getBoundingClientRect()
+  if (rect) {
+    const spaceAbove = Math.max(0, hit.y - 10)
+    const spaceBelow = Math.max(0, rect.height - hit.bottom - 10)
+    // 上方放不下简洁操作条、且下面确实更宽裕时，才翻到下方。
+    const below = spaceAbove < 280 && spaceBelow > spaceAbove
+    const half = Math.min(260, Math.max(80, (rect.width - 20) / 2))
+    const left = Math.max(half + 6, Math.min(rect.width - half - 6, hit.x + hit.w / 2))
+    const top = below ? Math.min(rect.height - 10, hit.bottom + 8) : Math.max(10, hit.y - 8)
+    quickAnchor.value = {
+      left,
+      top,
+      below,
+      maxHeight: Math.max(120, below ? rect.height - top - 10 : top - 10),
+    }
+  } else {
+    quickAnchor.value = null
+  }
   controls.value = false
 }
 
 function closeQuick() {
+  const seq = quickTarget.value?.seq
+  if (seq) dmCanvas.value?.release(seq)
   quickTarget.value = null
+  quickAnchor.value = null
   quickReply.value = false
+  quickReport.value = false
+  quickReporting.value = false
+  quickReportHint.value = ''
+  quickReportDone.value = false
   quickText.value = ''
   quickHint.value = ''
+  cancelHoverClose()
+  clearHoverOpen()
   reveal()
+}
+
+function startQuickReport() {
+  if (!quickTarget.value) return
+  if (!store.loggedIn) {
+    quickHint.value = '先登录 B 站账号才能举报'
+    return
+  }
+  quickReport.value = true
+  quickReportHint.value = ''
+}
+
+async function submitQuickReport() {
+  if (!quickTarget.value || quickReporting.value) return
+  quickReporting.value = true
+  quickReportHint.value = ''
+  try {
+    const result: ReportResult = await reportMessage(quickTarget.value, quickReportReason.value)
+    quickReportDone.value = result.ok
+    quickReportHint.value = result.unsupported
+      ? `${result.message}。也可以打开原直播间后长按弹幕举报。`
+      : result.message
+  } finally {
+    quickReporting.value = false
+  }
+}
+
+function openSourceRoom() {
+  const roomId = quickTarget.value?.sourceRoomId
+  if (!roomId) return
+  window.open(`https://live.bilibili.com/${roomId}`, '_blank', 'noopener,noreferrer')
 }
 
 function doQuickPlusOne() {
@@ -382,7 +670,8 @@ function onKey(e: KeyboardEvent) {
   } else if (e.key === 's' || e.key === 'S') {
     toggleSc()
   } else if (e.key === 'Escape') {
-    if (quickTarget.value) closeQuick()
+    if (cropMode.value) cancelCrop()
+    else if (quickTarget.value) closeQuick()
     else if (isFullscreen.value) void toggleFullscreen()
   }
 }
@@ -428,7 +717,7 @@ onMounted(() => {
   window.addEventListener('keydown', onKey)
   window.addEventListener('resize', onWindowResize)
   const zone = zoneEl.value
-  if (zone) miniW.value = Math.min(zone.clientWidth * 0.3, 320)
+  if (zone) miniW.value = defaultMiniWidth(zone.clientWidth)
   clampMiniPos()
   reveal()
 })
@@ -438,6 +727,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
   window.removeEventListener('resize', onWindowResize)
   if (hideTimer) clearTimeout(hideTimer)
+  cancelHoverClose()
+  clearHoverOpen()
 })
 </script>
 
@@ -448,7 +739,7 @@ onBeforeUnmount(() => {
       class="video-zone"
       :class="{ 'mini-open': miniOn && !miniExpanded }"
       @pointerdown="onZoneTap"
-      @mousemove="onMouseMove"
+      @pointermove="onZoneMove"
     >
       <video ref="videoBEl" class="video-b" playsinline :style="{ objectFit: videoFit }"></video>
 
@@ -458,7 +749,7 @@ onBeforeUnmount(() => {
 
       <!-- 浏览器拦截自动播放时，用一次点击解锁声音 -->
       <button
-        v-if="store.a.blocked || store.b.blocked"
+        v-if="store.a.blocked || store.b.blocked || store.sources.some((s) => s.blocked)"
         class="play-gate"
         @pointerdown.stop
         @click.stop="resumePlayback"
@@ -548,6 +839,15 @@ onBeforeUnmount(() => {
           </button>
           <button
             class="dock-btn"
+            :class="{ on: store.sources.length > 0 }"
+            title="导入更多直播间的弹幕 / 解说"
+            @click="openSettings('danmaku')"
+          >
+            <AppIcon name="plus" :size="17" />
+            <span>多路</span>
+          </button>
+          <button
+            class="dock-btn"
             :class="{ on: store.settings.sc.enabled }"
             title="SC 悬浮窗"
             @click="toggleSc"
@@ -575,7 +875,7 @@ onBeforeUnmount(() => {
       <!-- A 解说小窗 -->
       <div
         class="mini"
-        :class="{ expanded: miniExpanded, hidden: !miniOn }"
+        :class="{ expanded: miniExpanded, hidden: !miniOn, cropping: cropMode }"
         :style="
           miniExpanded
             ? undefined
@@ -587,16 +887,49 @@ onBeforeUnmount(() => {
         @pointercancel="onMiniPointerUp"
         @dblclick="onMiniDoubleClick"
       >
-        <video
-          ref="videoAEl"
-          playsinline
-          :style="{
-            transform: `translate(${miniPan.x}px, ${miniPan.y}px) scale(${miniZoom})`,
-          }"
-        ></video>
+        <div class="mini-frame" :style="miniCropStyle ? { transform: miniCropStyle } : undefined">
+          <video
+            ref="videoAEl"
+            playsinline
+            :style="{
+              transform: `translate(${miniPan.x}px, ${miniPan.y}px) scale(${miniZoom})`,
+            }"
+          ></video>
+        </div>
+
+        <div
+          v-if="miniExpanded && cropMode"
+          class="crop-layer"
+          @pointerdown.stop="onCropDown"
+          @pointermove.stop="onCropMove"
+          @pointerup.stop="onCropUp"
+          @pointercancel.stop="onCropUp"
+        >
+          <div
+            v-if="cropDraft"
+            class="crop-box"
+            :style="{
+              left: cropDraft.x * 100 + '%',
+              top: cropDraft.y * 100 + '%',
+              width: cropDraft.w * 100 + '%',
+              height: cropDraft.h * 100 + '%',
+            }"
+          ></div>
+          <span class="crop-tip">拖动框选要放大的画面区域</span>
+        </div>
+
         <div class="mini-top">
-          <span class="mini-tag"><i></i>A · 解说</span>
+          <span class="mini-tag"><i></i>A · 解说{{ miniCrop ? ' · 已裁切' : '' }}</span>
           <span class="mini-btns">
+            <button
+              v-if="miniExpanded"
+              :class="{ on: cropMode }"
+              title="框选裁切画面"
+              @pointerdown.stop
+              @click.stop="toggleCropMode"
+            >
+              <AppIcon name="crop" :size="13" />
+            </button>
             <button
               title="重置缩放"
               @pointerdown.stop
@@ -616,32 +949,70 @@ onBeforeUnmount(() => {
             </button>
           </span>
         </div>
-        <div
-          v-if="!miniExpanded"
-          class="mini-resize"
-          title="拖动缩放"
-          @pointerdown="onResizeDown"
-          @pointermove="onResizeMove"
-          @pointerup="onResizeUp"
-          @pointercancel="onResizeUp"
-        ></div>
+
+        <div v-if="miniExpanded && cropMode" class="crop-actions" @pointerdown.stop>
+          <button class="crop-btn primary" @click="applyCrop">应用裁切</button>
+          <button class="crop-btn" :disabled="!miniCrop" @click="resetCrop">清除</button>
+          <button class="crop-btn dim" @click="cancelCrop">取消</button>
+        </div>
+
+        <template v-if="!miniExpanded">
+          <div
+            v-for="corner in (['tl', 'tr', 'bl', 'br'] as const)"
+            :key="corner"
+            class="mini-resize"
+            :class="corner"
+            title="拖动边角等比缩放"
+            @pointerdown.stop="onResizeDown($event, corner)"
+            @pointermove.stop="onResizeMove"
+            @pointerup.stop="onResizeUp"
+            @pointercancel.stop="onResizeUp"
+          ></div>
+        </template>
       </div>
 
-      <!-- 点中画面弹幕后的快捷条 -->
-      <div v-if="quickTarget" class="quickbar" @pointerdown.stop>
+      <!-- 点中 / 悬停画面弹幕后浮出的快捷条 -->
+      <div
+        v-if="quickTarget"
+        class="quickbar"
+        :class="{ below: quickAnchor?.below, 'from-hover': quickMode === 'hover' }"
+        :style="
+          quickAnchor
+            ? { left: quickAnchor.left + 'px', top: quickAnchor.top + 'px', maxHeight: quickAnchor.maxHeight + 'px' }
+            : undefined
+        "
+        @pointerdown.stop
+        @mouseenter="cancelHoverClose"
+        @mouseleave="scheduleHoverClose"
+      >
         <div class="quick-head">
-          <span class="quick-avatar">{{ (quickTarget.uname || '匿').slice(0, 1) }}</span>
+          <span
+            class="quick-avatar"
+            :style="quickTarget.sourceColor ? { background: quickTarget.sourceColor } : undefined"
+          >
+            {{ (quickTarget.uname || '匿').slice(0, 1) }}
+          </span>
           <div class="quick-who">
             <strong>{{ quickTarget.uname || '匿名' }}</strong>
-            <small v-if="quickTarget.medal">{{ quickTarget.medal }}</small>
+            <small>
+              <span
+                v-if="quickTarget.sourceId && quickTarget.sourceId !== 'a'"
+                class="quick-source"
+                :style="{ color: quickTarget.sourceColor }"
+              >
+                {{ quickTarget.sourceName }}
+              </span>
+              <span v-if="quickTarget.medal">{{ quickTarget.medal }}</span>
+            </small>
           </div>
+          <span class="quick-frozen">已暂停</span>
           <button class="quick-x" @click="closeQuick">
             <AppIcon name="close" :size="16" />
           </button>
         </div>
         <p class="quick-text">{{ quickTarget.text }}</p>
 
-        <template v-if="!quickReply">
+        <template v-if="!quickReply && !quickReport">
           <p v-if="quickHint" class="quick-hint">{{ quickHint }}</p>
           <p v-else-if="store.sendState.error" class="quick-hint">{{ store.sendState.error }}</p>
           <div class="quick-actions">
@@ -654,13 +1025,17 @@ onBeforeUnmount(() => {
                 <AppIcon name="reply" :size="15" />
                 回复
               </button>
+              <button v-if="canInteract(quickTarget)" class="qbtn" @click="startQuickReport">
+                <AppIcon name="flag" :size="15" />
+                举报
+              </button>
             </template>
             <button v-else class="qbtn plus" @click="openSettings('account')">去登录</button>
             <button class="qbtn dim" @click="closeQuick">关闭</button>
           </div>
         </template>
 
-        <template v-else>
+        <template v-else-if="quickReply">
           <div class="quick-input-row">
             <input
               ref="quickInput"
@@ -692,6 +1067,39 @@ onBeforeUnmount(() => {
             </button>
           </div>
         </template>
+
+        <template v-else>
+          <div class="report-head">
+            <AppIcon name="flag" :size="14" />
+            举报这条弹幕
+          </div>
+          <div class="report-reasons">
+            <button
+              v-for="r in REPORT_REASONS"
+              :key="r.value"
+              class="report-chip"
+              :class="{ on: quickReportReason === r.value }"
+              @click="quickReportReason = r.value"
+            >
+              {{ r.label }}
+            </button>
+          </div>
+          <p v-if="quickReportHint" class="quick-hint">{{ quickReportHint }}</p>
+          <p v-else class="quick-note">
+            提交到 {{ quickTarget.sourceName || '原直播间' }}，由 B 站审核。
+          </p>
+          <div class="quick-actions">
+            <button class="qbtn dim" @click="quickReport = false; quickReportHint = ''">返回</button>
+            <button class="qbtn" @click="openSourceRoom">打开直播间</button>
+            <button
+              class="qbtn plus"
+              :disabled="quickReporting || quickReportDone"
+              @click="submitQuickReport"
+            >
+              {{ quickReportDone ? '已提交' : quickReporting ? '提交中…' : '提交举报' }}
+            </button>
+          </div>
+        </template>
       </div>
 
       <!-- 错误提示 -->
@@ -715,6 +1123,7 @@ onBeforeUnmount(() => {
       ref="chatPanel"
       @collapse="chatCollapsed = true"
       @login="openSettings('account')"
+      @import="openSettings('danmaku')"
     />
     <div v-else class="chat-fab-row">
       <button class="chat-fab" @click="chatCollapsed = false">
@@ -1126,6 +1535,14 @@ onBeforeUnmount(() => {
   cursor: grab;
 }
 
+.mini-frame {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+  overflow: hidden;
+  will-change: transform;
+}
+
 .mini video {
   width: 100%;
   height: 100%;
@@ -1160,6 +1577,7 @@ onBeforeUnmount(() => {
   top: 0;
   left: 0;
   right: 0;
+  z-index: 4;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1206,15 +1624,150 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(6px);
 }
 
+.mini-btns button.on {
+  background: var(--accent);
+}
+
+/* ---------- 框选裁切 ---------- */
+
+.crop-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  cursor: crosshair;
+  touch-action: none;
+  background: rgba(0, 0, 0, 0.16);
+}
+
+.crop-box {
+  position: absolute;
+  border: 2px solid #fff;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.42);
+  pointer-events: none;
+}
+
+.crop-tip {
+  position: absolute;
+  left: 50%;
+  bottom: 64px;
+  transform: translateX(-50%);
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.6);
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 11px;
+  white-space: nowrap;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+
+.crop-actions {
+  position: absolute;
+  left: 50%;
+  bottom: calc(18px + var(--safe-bottom));
+  transform: translateX(-50%);
+  z-index: 4;
+  display: flex;
+  gap: 8px;
+  padding: 7px;
+  border-radius: 999px;
+  background: rgba(20, 17, 14, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.4);
+}
+
+.crop-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 8px 15px;
+  font-size: 12px;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff8ef;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.crop-btn.primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.crop-btn.dim {
+  background: transparent;
+  color: rgba(255, 248, 239, 0.6);
+}
+
+.crop-btn:disabled {
+  opacity: 0.4;
+}
+
+/* ---------- 小窗四角缩放 ---------- */
+
 .mini-resize {
   position: absolute;
+  width: 22px;
+  height: 22px;
+  z-index: 3;
+  touch-action: none;
+}
+
+.mini-resize::after {
+  content: '';
+  position: absolute;
+  inset: 6px;
+  border: 0 solid rgba(255, 255, 255, 0.72);
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
+}
+
+.mini-resize.br {
   right: 0;
   bottom: 0;
-  width: 18px;
-  height: 18px;
   cursor: nwse-resize;
-  background: linear-gradient(135deg, transparent 50%, rgba(255, 255, 255, 0.45) 50%);
-  touch-action: none;
+}
+
+.mini-resize.br::after {
+  border-right-width: 2px;
+  border-bottom-width: 2px;
+  border-bottom-right-radius: 3px;
+}
+
+.mini-resize.bl {
+  left: 0;
+  bottom: 0;
+  cursor: nesw-resize;
+}
+
+.mini-resize.bl::after {
+  border-left-width: 2px;
+  border-bottom-width: 2px;
+  border-bottom-left-radius: 3px;
+}
+
+.mini-resize.tr {
+  right: 0;
+  top: 30px;
+  cursor: nesw-resize;
+}
+
+.mini-resize.tl {
+  left: 0;
+  top: 30px;
+  cursor: nwse-resize;
+}
+
+.mini-resize.tr::after {
+  border-right-width: 2px;
+  border-top-width: 2px;
+  border-top-right-radius: 3px;
+}
+
+.mini-resize.tl::after {
+  border-left-width: 2px;
+  border-top-width: 2px;
+  border-top-left-radius: 3px;
 }
 
 /* SC 悬浮窗和 A 小窗并排时让出空间 */
@@ -1227,10 +1780,11 @@ onBeforeUnmount(() => {
 .quickbar {
   position: absolute;
   left: 50%;
-  transform: translateX(-50%);
-  width: min(520px, calc(100% - 24px));
-  bottom: calc(66px + var(--safe-bottom));
-  z-index: 9;
+  transform: translate(-50%, calc(-100% - 4px));
+  width: min(520px, calc(100% - 20px));
+  max-height: calc(100% - 20px);
+  overflow-y: auto;
+  z-index: 12;
   background: rgba(255, 251, 244, 0.98);
   border: 1px solid rgba(255, 255, 255, 0.7);
   border-radius: 22px;
@@ -1239,9 +1793,17 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 8px;
   box-shadow: 0 22px 60px rgba(0, 0, 0, 0.42);
-  animation: fadeUp 0.2s ease;
+  animation: fadeUp 0.16s ease;
   color: var(--text);
   backdrop-filter: blur(20px);
+}
+
+.quickbar.below {
+  transform: translate(-50%, 0);
+}
+
+.quickbar.from-hover {
+  animation: none;
 }
 
 .quick-head {
@@ -1280,8 +1842,29 @@ onBeforeUnmount(() => {
 }
 
 .quick-who small {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 9.5px;
   color: var(--text-faint);
+  min-width: 0;
+}
+
+.quick-source {
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.quick-frozen {
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 650;
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-radius: 999px;
+  padding: 3px 8px;
 }
 
 .quick-x {
@@ -1343,6 +1926,45 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 11px;
   color: var(--danger);
+}
+
+.quick-note {
+  margin: 0;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.report-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.report-reasons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.report-chip {
+  border: 1px solid var(--line);
+  background: var(--bg-soft);
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.report-chip.on {
+  background: var(--accent-soft);
+  border-color: rgba(217, 119, 87, 0.35);
+  color: var(--accent-strong);
+  font-weight: 650;
 }
 
 .quick-actions {

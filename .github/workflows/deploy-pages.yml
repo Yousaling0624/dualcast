@@ -39,6 +39,10 @@ jobs:
         working-directory: sanlu-pwa
         run: npm run typecheck
 
+      - name: Unit tests
+        working-directory: sanlu-pwa
+        run: npm test
+
       - name: Build
         working-directory: sanlu-pwa
         env:

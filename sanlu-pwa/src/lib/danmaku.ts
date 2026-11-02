@@ -46,6 +46,16 @@ export interface ChatMsg {
   history?: boolean
   /** 这条弹幕回复的是谁（部分服务端会带） */
   replyTo?: string
+  /** 多路弹幕：来源标识（主房间固定为 'a'） */
+  sourceId?: string
+  /** 来源主播 / 房间名 */
+  sourceName?: string
+  /** 来源气泡颜色 */
+  sourceColor?: string
+  /** 来源气泡文字；空字符串表示只显示颜色气泡 */
+  badge?: string
+  /** 来源直播间号，+1 / 回复时用来发回正确的房间 */
+  sourceRoomId?: number
 }
 
 export type DanmakuStatus = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed' | 'failed'

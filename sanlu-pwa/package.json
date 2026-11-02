@@ -1,12 +1,14 @@
 {
   "name": "sanlu-dualcast",
   "private": true,
-  "version": "1.5.0",
+  "version": "1.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "typecheck": "vue-tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "preview": "vite preview",
     "deploy": "vite build && wrangler pages deploy dist --project-name sanlu"
   },
@@ -23,6 +25,7 @@
     "@vitejs/plugin-vue": "^5.2.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.7",
+    "vitest": "^5.1.0",
     "vue-tsc": "^2.2.12",
     "wrangler": "^4.1.0"
   }

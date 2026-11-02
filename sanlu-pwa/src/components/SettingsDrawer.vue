@@ -2,16 +2,22 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import QRCode from 'qrcode'
 import {
+  addSource,
   finishLogin,
   logout,
   nudgeOffset,
+  removeSource,
   resetOffset,
+  retrySource,
   setCommentary,
   setOffset,
   setQuality,
   setVolume,
   store,
+  updateSource,
 } from '../lib/store'
+import type { ExtraRoom } from '../lib/store'
+import { SOURCE_PALETTE, badgePreviewText } from '../lib/sources'
 import { qnLabel, qrGenerate, qrPoll } from '../lib/bili'
 import {
   defaultRelay,
@@ -238,6 +244,55 @@ function only(which: 'a' | 'b') {
 function both() {
   setVolume('a', 0.85)
   setVolume('b', 1)
+}
+
+/* 多路弹幕 / 解说 */
+const sourceInput = ref('')
+
+async function importSource() {
+  if (store.sourceBusy || !sourceInput.value.trim()) return
+  const source = await addSource(sourceInput.value)
+  if (source) sourceInput.value = ''
+}
+
+function sourceStatus(s: ExtraRoom): string {
+  if (s.audioError) return s.audioError
+  if (s.error && s.status === 'idle') return s.error
+  if (s.status === 'open') return s.commentary ? '弹幕已连接 · 混音中' : '弹幕已连接'
+  if (s.status === 'connecting') return '连接中…'
+  if (s.status === 'reconnecting') return '重连中…'
+  if (s.status === 'failed') return s.error || '连接失败'
+  if (s.commentary) return '混音准备中…'
+  return s.liveStatus === 1 ? '直播中 · 弹幕未连接' : '弹幕未连接'
+}
+
+function sourceBadge(s: ExtraRoom): string {
+  return badgePreviewText(s.badgeMode, {
+    uname: s.uname,
+    custom: s.badgeText,
+    color: s.color,
+  })
+}
+
+function cycleSourceColor(s: ExtraRoom) {
+  const index = SOURCE_PALETTE.indexOf(s.color as (typeof SOURCE_PALETTE)[number])
+  updateSource(s.id, { color: SOURCE_PALETTE[(index + 1) % SOURCE_PALETTE.length] })
+}
+
+function setSourceBadgeMode(s: ExtraRoom, mode: ExtraRoom['badgeMode']) {
+  updateSource(s.id, { badgeMode: mode })
+}
+
+function setSourceCustom(s: ExtraRoom, e: Event) {
+  updateSource(s.id, { badgeText: (e.target as HTMLInputElement).value })
+}
+
+function setSourceCommentary(s: ExtraRoom, e: Event) {
+  updateSource(s.id, { commentary: (e.target as HTMLInputElement).checked })
+}
+
+function setSourceVolume(s: ExtraRoom, e: Event) {
+  updateSource(s.id, { volume: Number((e.target as HTMLInputElement).value) })
 }
 
 function relayModeText(): string {
@@ -486,6 +541,127 @@ defineOptions({ name: 'SettingsDrawer' })
               <div class="group">
                 <div class="group-head">
                   <div>
+                    <h3>多路弹幕 / 解说</h3>
+                    <p>
+                      导入其他直播间后，弹幕会带上彩色气泡；打开「加入解说」会把这一路的声音混进来，
+                      比赛画面仍然只保留 B 路。
+                    </p>
+                  </div>
+                  <AppIcon name="plus" :size="19" class="group-icon accent" />
+                </div>
+
+                <div class="source-import">
+                  <input
+                    v-model="sourceInput"
+                    class="field"
+                    placeholder="房间号或 live.bilibili.com 链接"
+                    @keydown.enter="importSource"
+                  />
+                  <button
+                    class="btn-outline"
+                    :disabled="store.sourceBusy || !sourceInput.trim()"
+                    @click="importSource"
+                  >
+                    {{ store.sourceBusy ? '解析中…' : '导入' }}
+                  </button>
+                </div>
+                <p v-if="store.sourceError" class="err-text">{{ store.sourceError }}</p>
+
+                <div v-for="s in store.sources" :key="s.id" class="source-card">
+                  <div class="source-head">
+                    <span class="source-badge" :style="{ background: s.color }">
+                      {{ sourceBadge(s) }}
+                    </span>
+                    <div class="source-who">
+                      <strong>{{ s.uname || s.title || `房间 ${s.roomId}` }}</strong>
+                      <small>
+                        {{ s.title || `房间 ${s.roomId}` }} · {{ sourceStatus(s) }}
+                      </small>
+                    </div>
+                    <button
+                      class="mini-icon"
+                      title="重试这一路"
+                      @click="retrySource(s.id)"
+                    >
+                      <AppIcon name="refresh" :size="15" />
+                    </button>
+                    <button
+                      class="mini-icon danger"
+                      title="移除这个直播间"
+                      @click="removeSource(s.id)"
+                    >
+                      <AppIcon name="close" :size="15" />
+                    </button>
+                  </div>
+
+                  <div class="source-row">
+                    <span class="source-kicker">气泡</span>
+                    <div class="segs">
+                      <button
+                        v-for="mode in (['color', 'initial', 'custom'] as const)"
+                        :key="mode"
+                        :class="{ on: s.badgeMode === mode }"
+                        @click="setSourceBadgeMode(s, mode)"
+                      >
+                        {{ mode === 'color' ? '颜色' : mode === 'initial' ? '首字' : '自定义' }}
+                      </button>
+                    </div>
+                    <button class="color-cycle" title="换一个气泡颜色" @click="cycleSourceColor(s)">
+                      <i :style="{ background: s.color }"></i>
+                      换色
+                    </button>
+                  </div>
+
+                  <div v-if="s.badgeMode === 'custom'" class="source-row">
+                    <span class="source-kicker">自定义字</span>
+                    <input
+                      class="field compact"
+                      :value="s.badgeText"
+                      maxlength="2"
+                      placeholder="比如：主、二台、A"
+                      @input="setSourceCustom(s, $event)"
+                    />
+                  </div>
+
+                  <label class="row source-commentary">
+                    <span class="row-text">
+                      <strong>加入解说混音</strong>
+                      <small>只混入声音，不占用比赛画面</small>
+                    </span>
+                    <span class="switch">
+                      <input
+                        type="checkbox"
+                        :checked="s.commentary"
+                        @change="setSourceCommentary(s, $event)"
+                      />
+                      <span class="track"></span><span class="thumb"></span>
+                    </span>
+                  </label>
+
+                  <div v-if="s.commentary" class="source-row">
+                    <span class="source-kicker">音量</span>
+                    <input
+                      class="source-vol"
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.01"
+                      :value="s.volume"
+                      :style="{ '--fill': Math.round(s.volume * 100) + '%' }"
+                      @input="setSourceVolume(s, $event)"
+                    />
+                    <em class="source-pct">{{ Math.round(s.volume * 100) }}%</em>
+                  </div>
+                </div>
+
+                <p v-if="!store.sources.length" class="dim small">
+                  还没有导入其他直播间。导入后可以同时看多个直播间的弹幕。
+                </p>
+              </div>
+
+              <div class="group">
+                <div class="group-head">
+                  <div>
                     <h3>SC 悬浮窗</h3>
                     <p>和浏览器脚本一样，在画面左上角浮出醒目留言；全屏也会显示。</p>
                   </div>
@@ -628,7 +804,7 @@ defineOptions({ name: 'SettingsDrawer' })
                 <div class="group-head">
                   <div>
                     <h3>延迟校准</h3>
-                    <p>解说比画面快或慢时，在这里把 A 的声音往后或往前挪。</p>
+                    <p>解说比画面快或慢时，让快的那一路主动暂停一下，等另一路追上来。</p>
                   </div>
                   <AppIcon name="tune" :size="19" class="group-icon accent" />
                 </div>
@@ -668,8 +844,9 @@ defineOptions({ name: 'SettingsDrawer' })
                 </div>
 
                 <p class="dim small">
-                  正数让 A 晚一点，负数让 B 晚一点。调节后会等缓冲跟上，偶尔短暂停顿是正常的。
-                  偏移和音量都会按「A 房间 + B 房间」记住。
+                  往右拖（正数）时 A 路会暂停相应时长，让直播缓冲先跑，恢复后解说就落在画面后面；
+                  往左拖（负数）则改为暂停 B 路。往回调时会自动跳到缓冲更靠前的位置追回来，
+                  所以调节时某一头短暂停住是预期效果。偏移和音量都会按「A 房间 + B 房间」记住。
                 </p>
               </div>
             </section>
@@ -817,7 +994,7 @@ defineOptions({ name: 'SettingsDrawer' })
                 <div class="about-logo">叠</div>
                 <div>
                   <h3>叠播 DualCast</h3>
-                  <p>v1.5 · PWA 网页版</p>
+                  <p>v1.6 · PWA 网页版</p>
                 </div>
               </div>
               <p class="dim">
@@ -1238,6 +1415,164 @@ input[type='range'] {
   font-size: 12px;
   margin: 0;
   line-height: 1.5;
+}
+
+/* 多路弹幕 */
+.source-import {
+  display: flex;
+  gap: 7px;
+  margin: 9px 0 3px;
+}
+
+.source-import .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.source-import .btn-outline {
+  flex: 0 0 auto;
+  padding: 9px 15px;
+}
+
+.source-card {
+  margin: 7px 0 4px;
+  padding: 10px 11px 6px;
+  border: 1px solid var(--line);
+  border-radius: 17px;
+  background: var(--bg-soft);
+}
+
+.source-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.source-badge {
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border-radius: 9px;
+  display: inline-grid;
+  place-items: center;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  flex: 0 0 auto;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+}
+
+.source-who {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.source-who strong {
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-who small {
+  font-size: 10px;
+  color: var(--text-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.source-head .mini-icon {
+  width: 29px;
+  height: 29px;
+}
+
+.source-head .mini-icon.danger {
+  color: var(--danger);
+}
+
+.source-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  min-width: 0;
+}
+
+.source-kicker {
+  width: 54px;
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  color: var(--text-faint);
+}
+
+.source-row .segs {
+  gap: 4px;
+}
+
+.source-row .segs button {
+  padding: 5px 10px;
+  font-size: 11px;
+}
+
+.color-cycle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  padding: 5px 9px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.color-cycle i {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: block;
+}
+
+.field.compact {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.source-commentary {
+  border-bottom: none;
+  min-height: 0;
+  padding-top: 8px;
+  padding-bottom: 2px;
+}
+
+.source-commentary .row-text strong {
+  font-size: 12px;
+}
+
+.source-vol {
+  flex: 1;
+}
+
+.source-pct {
+  width: 34px;
+  text-align: right;
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  flex: 0 0 auto;
 }
 
 /* 账号 */

@@ -21,11 +21,23 @@ import {
   formatCount,
   initRoom,
   qnLabel,
+  reportDanmaku,
   sendDanmaku,
   type BiliAccount,
+  type ReportResult,
   type RoomInfo,
+  type RoomPlay,
 } from './bili'
 import { getCookieValue, hasCookie, saveCookieString } from './net'
+import { clampOffset, offsetsForSession } from './sync'
+import {
+  badgeForSource,
+  firstGlyph,
+  normalizeBadgeText,
+  PRIMARY_SOURCE_COLOR,
+  roomColor,
+  type BadgeMode,
+} from './sources'
 
 export type DanmakuStyle = 'outline' | 'shadow' | 'plain'
 export type VideoScale = 'fit' | 'crop' | 'fill'
@@ -68,6 +80,36 @@ export interface RecentRoom {
   title: string
   uname: string
   usedAt: number
+}
+
+/**
+ * 导入的额外直播间：
+ * - 总是订阅该房间的弹幕；
+ * - 打开 commentary 后，还会把这一路的声音混进解说（比赛画面仍然只有 B 路）。
+ */
+export interface ExtraRoom {
+  id: string
+  input: string
+  roomId: number
+  shortId: number
+  uid: number
+  title: string
+  uname: string
+  face: string
+  liveStatus: number
+  online: number
+  areaName: string
+  /** 气泡模式：纯颜色 / 主播首字 / 自定义字 */
+  badgeMode: BadgeMode
+  badgeText: string
+  color: string
+  commentary: boolean
+  volume: number
+  status: DanmakuStatus
+  error: string
+  /** 单独的混音错误，避免和弹幕连接错误互相覆盖 */
+  audioError: string
+  blocked: boolean
 }
 
 export interface Settings {
@@ -250,6 +292,80 @@ function loadProfiles(): Record<string, RoomProfile> {
   return readJson('dc_profiles', {})
 }
 
+const BADGE_MODES: BadgeMode[] = ['color', 'initial', 'custom']
+
+function normalizeSource(raw: any): ExtraRoom | null {
+  const roomId = Number(raw?.roomId || 0)
+  if (!roomId) return null
+  const uname = String(raw?.uname || '')
+  const mode = BADGE_MODES.includes(raw?.badgeMode) ? (raw.badgeMode as BadgeMode) : 'initial'
+  const color = /^#[0-9a-fA-F]{6}$/.test(String(raw?.color || ''))
+    ? String(raw.color)
+    : roomColor(roomId)
+  return {
+    id: String(raw?.id || `r${roomId}`),
+    input: String(raw?.input || roomId),
+    roomId,
+    shortId: Number(raw?.shortId || 0),
+    uid: Number(raw?.uid || 0),
+    title: String(raw?.title || ''),
+    uname,
+    face: String(raw?.face || ''),
+    liveStatus: Number(raw?.liveStatus || 0),
+    online: Number(raw?.online || 0),
+    areaName: String(raw?.areaName || ''),
+    badgeMode: mode,
+    badgeText: normalizeBadgeText(String(raw?.badgeText || '')),
+    color,
+    commentary: !!raw?.commentary,
+    volume: Number.isFinite(Number(raw?.volume))
+      ? Math.max(0, Math.min(1, Number(raw.volume)))
+      : 0.6,
+    status: 'idle',
+    error: '',
+    audioError: '',
+    blocked: false,
+  }
+}
+
+function loadSources(): ExtraRoom[] {
+  const raw: any = readJson('dc_sources', { list: [] })
+  const list: any[] = Array.isArray(raw?.list) ? raw.list : Array.isArray(raw) ? raw : []
+  const seen = new Set<number>()
+  return list
+    .map(normalizeSource)
+    .filter((s): s is ExtraRoom => {
+      if (!s || seen.has(s.roomId)) return false
+      seen.add(s.roomId)
+      return true
+    })
+}
+
+function sourceRecord(s: ExtraRoom) {
+  return {
+    id: s.id,
+    input: s.input,
+    roomId: s.roomId,
+    shortId: s.shortId,
+    uid: s.uid,
+    title: s.title,
+    uname: s.uname,
+    face: s.face,
+    liveStatus: s.liveStatus,
+    online: s.online,
+    areaName: s.areaName,
+    badgeMode: s.badgeMode,
+    badgeText: s.badgeText,
+    color: s.color,
+    commentary: s.commentary,
+    volume: s.volume,
+  }
+}
+
+function persistSources() {
+  writeJson('dc_sources', { list: store.sources.map(sourceRecord) })
+}
+
 export const store = reactive({
   view: 'home' as 'home' | 'live',
   a: emptySlot(),
@@ -277,6 +393,10 @@ export const store = reactive({
   settings: loadSettings(),
   combos: loadCombos(),
   recent: loadRecent(),
+  /** 导入的额外弹幕 / 解说直播间 */
+  sources: loadSources(),
+  sourceBusy: false,
+  sourceError: '',
   playing: true,
   sessionVolumes: { a: 0.85, b: 1 },
   sessionOffset: 0,
@@ -290,6 +410,12 @@ let playerA: StreamPlayer | null = null
 let playerB: StreamPlayer | null = null
 let videoAEl: HTMLVideoElement | null = null
 let videoBEl: HTMLVideoElement | null = null
+
+/** 导入房间各自的弹幕连接 */
+const extraClients = new Map<string, DanmakuClient>()
+/** 导入房间中「加入解说」的那几路：隐藏 video + 播放器 */
+const extraPlayers = new Map<string, { video: HTMLVideoElement; player: StreamPlayer }>()
+const extraPlayerPending = new Set<string>()
 
 const slotStreams: Record<'a' | 'b', StreamSet> = {
   a: { flv: [], hls: [] },
@@ -305,7 +431,7 @@ let resolveToken = { a: 0, b: 0 }
 let saveSlotsTimer: number | null = null
 let saveProfileTimer: number | null = null
 let wakeLock: WakeLockSentinel | null = null
-const pendingSelfEcho: { text: string; until: number }[] = []
+const pendingSelfEcho: { text: string; roomId: number; until: number }[] = []
 
 const profiles = loadProfiles()
 
@@ -334,17 +460,74 @@ function trimMessages() {
   }
 }
 
-function consumeSelfEcho(text: string): boolean {
+function consumeSelfEcho(text: string, roomId?: number): boolean {
   const now = Date.now()
   while (pendingSelfEcho.length && pendingSelfEcho[0].until < now) pendingSelfEcho.shift()
-  const i = pendingSelfEcho.findIndex((e) => e.text === text)
+  const i = pendingSelfEcho.findIndex(
+    (e) => e.text === text && (!roomId || e.roomId === roomId)
+  )
   if (i < 0) return false
   pendingSelfEcho.splice(i, 1)
   return true
 }
 
+interface SourceMeta {
+  id: string
+  roomId: number
+  name: string
+  color: string
+  badge: string
+}
+
+/** 消息来源的展示信息；主房间固定为 A。 */
+export function sourceMeta(sourceId?: string): SourceMeta | null {
+  if (!sourceId || sourceId === 'a') {
+    return {
+      id: 'a',
+      roomId: store.a.roomId,
+      name: store.a.uname || store.a.title || 'A 房间',
+      color: PRIMARY_SOURCE_COLOR,
+      badge: firstGlyph(store.a.uname) || 'A',
+    }
+  }
+  const s = store.sources.find((x) => x.id === sourceId)
+  if (!s) return null
+  const badge = badgeForSource(s.badgeMode, {
+    uname: s.uname,
+    custom: s.badgeText,
+    color: s.color,
+  })
+  return {
+    id: s.id,
+    roomId: s.roomId,
+    name: s.uname || s.title || `房间 ${s.roomId}`,
+    color: badge.color,
+    badge: badge.text,
+  }
+}
+
+function enrichMessage(m: ChatMsg, sourceId: string): ChatMsg {
+  const meta = sourceMeta(sourceId)
+  if (!meta) return m
+  return {
+    ...m,
+    sourceId: meta.id,
+    sourceName: meta.name,
+    sourceColor: meta.color,
+    badge: meta.badge,
+    sourceRoomId: meta.roomId,
+  }
+}
+
+/** 收到某个来源的一条消息 */
+function ingest(sourceId: string, raw: ChatMsg) {
+  const meta = sourceMeta(sourceId)
+  if (!meta) return
+  pushMessage(enrichMessage(raw, sourceId))
+}
+
 function pushMessage(m: ChatMsg) {
-  if (m.self && consumeSelfEcho(m.text)) return
+  if (m.self && consumeSelfEcho(m.text, m.sourceRoomId)) return
   if (hasDmid(m.dmid)) return
   const msg: ChatMsg = { ...m, seq: m.seq || 900000000 + ++pushSeq }
   store.messages.push(msg)
@@ -358,10 +541,22 @@ function pushMessage(m: ChatMsg) {
   trimMessages()
 }
 
-function insertHistory(list: ChatMsg[]) {
+function insertHistory(sourceId: string, list: ChatMsg[]) {
+  const meta = sourceMeta(sourceId)
+  if (!meta) return
   const fresh = list
     .filter((m) => m.text && !hasDmid(m.dmid))
-    .map((m) => ({ ...m, seq: -(++historySeq), history: true }))
+    .map((m, i) =>
+      enrichMessage(
+        {
+          ...m,
+          seq: -(++historySeq),
+          history: true,
+          dmid: m.dmid || `${sourceId}-history-${i}`,
+        },
+        sourceId
+      )
+    )
   if (!fresh.length) return
   store.messages.unshift(...fresh)
   trimMessages()
@@ -431,14 +626,15 @@ function applyVolumes() {
 
 /** sessionOffset > 0：A 晚一点；< 0：改为让 B 晚一点，效果是 A 相对提前 */
 function offsetFor(slot: 'a' | 'b'): number {
-  const off = store.sessionOffset
-  if (slot === 'a') return Math.max(0, off)
-  return Math.max(0, -off)
+  return offsetsForSession(store.sessionOffset)[slot]
 }
 
 function applyOffset() {
   playerA?.setSyncOffset(offsetFor('a'))
   playerB?.setSyncOffset(offsetFor('b'))
+  // 导入的解说声音跟着 A 一起晚 / 早，保证解说之间相对同步
+  const extraOffset = offsetFor('a')
+  for (const { player } of extraPlayers.values()) player.setSyncOffset(extraOffset)
 }
 
 /* ---------- 房间解析 ---------- */
@@ -615,7 +811,8 @@ function beginSession() {
   store.danmakuError = ''
   store.viewer = store.a.online
   // 播放器等 LiveView 挂载、拿到 video 元素后再绑定（见 LiveView onMounted）
-  connectDanmaku()
+  connectAllDanmaku()
+  ensureAllExtraPlayers()
   saveCombo()
   pushRecentFromSlot(store.a)
   pushRecentFromSlot(store.b)
@@ -634,7 +831,7 @@ function connectDanmaku() {
   const buvid = getCookieValue('buvid3')
   danmaku
     .connect(roomId, store.account.mid || 0, buvid, {
-      onMsg: pushMessage,
+      onMsg: (m) => ingest('a', m),
       onStatus: (s, err) => {
         store.danmakuStatus = s
         store.danmakuError = err || ''
@@ -648,6 +845,7 @@ function connectDanmaku() {
   void fetchDanmakuHistory(roomId).then((list) => {
     if (roomId !== store.a.roomId) return
     insertHistory(
+      'a',
       list.map((h, i) => ({
         seq: 0,
         kind: 'danmu' as const,
@@ -663,8 +861,177 @@ function connectDanmaku() {
   })
 }
 
+function connectAllDanmaku() {
+  connectDanmaku()
+  for (const source of store.sources) connectSource(source)
+}
+
+/** 导入的房间和 A/B 路重复时跳过，避免同一条弹幕出现两次、同一路声音混两遍 */
+function duplicateSource(source: ExtraRoom): boolean {
+  return (
+    source.roomId > 0 &&
+    (source.roomId === store.a.roomId || source.roomId === store.b.roomId)
+  )
+}
+
+function connectSource(source: ExtraRoom) {
+  const old = extraClients.get(source.id)
+  old?.stop()
+  if (store.view !== 'live' || !source.roomId) {
+    source.status = 'idle'
+    return
+  }
+  if (duplicateSource(source)) {
+    source.status = 'idle'
+    source.error = '这个直播间已经在 A / B 路，已跳过'
+    return
+  }
+  const client = new DanmakuClient()
+  extraClients.set(source.id, client)
+  source.status = 'connecting'
+  source.error = ''
+  const buvid = getCookieValue('buvid3')
+  client
+    .connect(source.roomId, store.account.mid || 0, buvid, {
+      onMsg: (m) => ingest(source.id, m),
+      onStatus: (s, err) => {
+        source.status = s
+        source.error = err || ''
+      },
+      onViewer: () => {},
+    })
+    .catch(() => {})
+
+  void fetchDanmakuHistory(source.roomId).then((list) => {
+    if (!store.sources.some((x) => x.id === source.id)) return
+    insertHistory(
+      source.id,
+      list.map((h, i) => ({
+        seq: 0,
+        kind: 'danmu' as const,
+        text: h.text,
+        uname: h.uname,
+        uid: h.uid,
+        dmid: h.dmid || `${source.id}-history-${i}`,
+        color: h.color,
+        medal: h.medal,
+        history: true,
+      }))
+    )
+  })
+}
+
+function stopSourceConnection(sourceId: string) {
+  const client = extraClients.get(sourceId)
+  if (client) {
+    client.stop()
+    extraClients.delete(sourceId)
+  }
+  const s = store.sources.find((x) => x.id === sourceId)
+  if (s) {
+    s.status = 'idle'
+    s.error = ''
+  }
+}
+
+function destroyExtraPlayer(sourceId: string) {
+  const entry = extraPlayers.get(sourceId)
+  if (!entry) return
+  entry.player.destroy()
+  entry.video.remove()
+  extraPlayers.delete(sourceId)
+}
+
+function destroyAllExtraPlayers() {
+  for (const id of [...extraPlayers.keys()]) destroyExtraPlayer(id)
+}
+
+function streamsFromPlay(play: RoomPlay): StreamSet {
+  const set: StreamSet = { flv: [], hls: [] }
+  for (const s of play.streams) {
+    if (s.protocol === 'flv') set.flv.push(...s.urls)
+    else set.hls.push(...s.urls)
+  }
+  return set
+}
+
+/**
+ * 为「加入解说」的房间创建隐藏播放器。
+ * 只取声音：video 放在屏幕外、不参与布局；画面始终只有 B 路。
+ */
+async function ensureExtraPlayer(source: ExtraRoom) {
+  if (!source.commentary || store.view !== 'live') return
+  if (duplicateSource(source)) {
+    source.audioError = '这个直播间已经在 A / B 路，不能重复混音'
+    return
+  }
+  if (extraPlayers.has(source.id) || extraPlayerPending.has(source.id)) return
+  extraPlayerPending.add(source.id)
+  source.audioError = ''
+  try {
+    const play = await fetchPlay(source.roomId, store.settings.video.defaultQn)
+    // 拉地址期间用户可能已经关闭「加入解说」或删除了房间
+    if (
+      !store.sources.some((x) => x.id === source.id) ||
+      !source.commentary ||
+      store.view !== 'live' ||
+      extraPlayers.has(source.id)
+    ) {
+      return
+    }
+    const streams = streamsFromPlay(play)
+    source.liveStatus = play.liveStatus || source.liveStatus
+    if (!streams.flv.length && !streams.hls.length) {
+      source.audioError =
+        source.liveStatus === 1 || source.liveStatus === 2
+          ? '拿不到播放地址，无法加入解说'
+          : '当前未开播，无法加入解说'
+      return
+    }
+    const video = document.createElement('video')
+    video.playsInline = true
+    video.setAttribute('aria-hidden', 'true')
+    video.style.cssText =
+      'position:fixed;left:-4px;bottom:-4px;width:2px;height:2px;opacity:0.01;pointer-events:none;z-index:-1'
+    document.body.appendChild(video)
+    const player = new StreamPlayer(
+      video,
+      streams,
+      (state, msg) => {
+        if (state === 'playing') {
+          source.blocked = false
+          source.audioError = ''
+        }
+        if (state === 'error') source.audioError = msg || '解说混音播放失败'
+      },
+      () => {
+        source.blocked = true
+      }
+    )
+    player.setVolume(source.volume)
+    player.setSyncOffset(offsetFor('a'))
+    player.start()
+    if (!store.playing) player.pause()
+    extraPlayers.set(source.id, { video, player })
+  } catch (e) {
+    source.audioError = e instanceof Error ? e.message : '解说混音播放失败'
+  } finally {
+    extraPlayerPending.delete(source.id)
+  }
+}
+
+function ensureAllExtraPlayers() {
+  for (const source of store.sources) {
+    if (source.commentary) void ensureExtraPlayer(source)
+  }
+}
+
 export function retryDanmaku() {
   danmaku.retry(store.account.mid || 0, getCookieValue('buvid3'))
+  const buvid = getCookieValue('buvid3')
+  for (const source of store.sources) {
+    extraClients.get(source.id)?.retry(store.account.mid || 0, buvid)
+  }
 }
 
 export async function reconnect() {
@@ -677,7 +1044,9 @@ export async function reconnect() {
     destroyPlayers()
     attachStreams()
     store.playing = true
-    connectDanmaku()
+    connectAllDanmaku()
+    ensureAllExtraPlayers()
+    for (const { player } of extraPlayers.values()) player.play()
     applyOffset()
   } catch (e) {
     store.startError = e instanceof Error ? e.message : String(e)
@@ -713,7 +1082,7 @@ export function swap() {
     attachStreams()
     applyVolumes()
     applyOffset()
-    connectDanmaku()
+    connectAllDanmaku()
     updateMediaSession()
     persistSlots()
     saveRoomProfileSoon()
@@ -761,6 +1130,17 @@ export function setQuality(key: 'a' | 'b', qn: number) {
 export function exitSession() {
   danmaku.stop()
   destroyPlayers()
+  for (const id of [...extraClients.keys()]) {
+    extraClients.get(id)?.stop()
+    extraClients.delete(id)
+  }
+  destroyAllExtraPlayers()
+  for (const source of store.sources) {
+    source.status = 'idle'
+    source.error = ''
+    source.audioError = ''
+    source.blocked = false
+  }
   slotStreams.a = { flv: [], hls: [] }
   slotStreams.b = { flv: [], hls: [] }
   store.view = 'home'
@@ -783,11 +1163,13 @@ export function resumePlayback() {
   store.b.blocked = false
   playerA?.play()
   playerB?.play()
+  for (const source of store.sources) source.blocked = false
+  for (const { player } of extraPlayers.values()) player.play()
   void requestWakeLock()
 }
 
 export function togglePlay() {
-  if (store.a.blocked || store.b.blocked) {
+  if (store.a.blocked || store.b.blocked || store.sources.some((s) => s.blocked)) {
     resumePlayback()
     return
   }
@@ -795,10 +1177,12 @@ export function togglePlay() {
   if (store.playing) {
     playerA?.play()
     playerB?.play()
+    for (const { player } of extraPlayers.values()) player.play()
     void requestWakeLock()
   } else {
     playerA?.pause()
     playerB?.pause()
+    for (const { player } of extraPlayers.values()) player.pause()
     releaseWakeLock()
   }
 }
@@ -818,7 +1202,7 @@ export function setVolume(which: 'a' | 'b', v: number) {
 }
 
 export function setOffset(ms: number) {
-  store.sessionOffset = Math.max(-5000, Math.min(5000, Math.round(ms)))
+  store.sessionOffset = clampOffset(ms)
   applyOffset()
   saveRoomProfileSoon()
 }
@@ -838,6 +1222,139 @@ export function toggleSc() {
 export function setCommentary(on: boolean) {
   store.commentaryOn = on
   store.settings.commentaryWindow = on
+}
+
+/* ---------- 多路弹幕 / 解说 ---------- */
+
+export async function addSource(input: string): Promise<ExtraRoom | null> {
+  if (store.sourceBusy) return null
+  const value = input.trim()
+  if (!value) {
+    store.sourceError = '先填房间号或直播间链接'
+    return null
+  }
+  store.sourceBusy = true
+  store.sourceError = ''
+  try {
+    const init = await initRoom(value)
+    if (!init.roomId) throw new Error('房间不存在')
+    if (init.roomId === store.a.roomId || init.roomId === store.b.roomId) {
+      throw new Error('这个直播间已经在 A / B 路里了')
+    }
+    if (store.sources.some((s) => s.roomId === init.roomId)) {
+      throw new Error('这个直播间已经导入过了')
+    }
+
+    const [infoR, playR] = await Promise.allSettled([
+      fetchRoomInfo(init.roomId),
+      fetchPlay(init.roomId, store.settings.video.defaultQn),
+    ])
+    const info = infoR.status === 'fulfilled' ? infoR.value : null
+    const play = playR.status === 'fulfilled' ? playR.value : null
+    const uname = info?.uname || ''
+    const source: ExtraRoom = {
+      id: `r${init.roomId}`,
+      input: value,
+      roomId: init.roomId,
+      shortId: init.shortId || info?.shortId || 0,
+      uid: init.uid || info?.uid || 0,
+      title: info?.title || `房间 ${init.roomId}`,
+      uname,
+      face: info?.face || '',
+      liveStatus: play?.liveStatus ?? info?.liveStatus ?? init.liveStatus,
+      online: info?.online || 0,
+      areaName: info?.areaName || '',
+      badgeMode: uname ? 'initial' : 'color',
+      badgeText: '',
+      color: roomColor(init.roomId),
+      commentary: false,
+      volume: 0.6,
+      status: 'idle',
+      error: '',
+      audioError: '',
+      blocked: false,
+    }
+    store.sources.push(source)
+    persistSources()
+    if (store.view === 'live') connectSource(source)
+    return source
+  } catch (e) {
+    store.sourceError = e instanceof Error ? e.message : String(e)
+    return null
+  } finally {
+    store.sourceBusy = false
+  }
+}
+
+export type SourcePatch = Partial<
+  Pick<ExtraRoom, 'badgeMode' | 'badgeText' | 'color' | 'commentary' | 'volume'>
+>
+
+export function updateSource(id: string, patch: SourcePatch) {
+  const source = store.sources.find((s) => s.id === id)
+  if (!source) return
+  if (patch.badgeMode) source.badgeMode = patch.badgeMode
+  if (patch.badgeText !== undefined) source.badgeText = normalizeBadgeText(patch.badgeText)
+  if (patch.color) source.color = patch.color
+  if (typeof patch.commentary === 'boolean') source.commentary = patch.commentary
+  if (patch.volume !== undefined) source.volume = Math.max(0, Math.min(1, patch.volume))
+  persistSources()
+
+  if (typeof patch.volume === 'number') {
+    extraPlayers.get(id)?.player.setVolume(source.volume)
+  }
+  if (typeof patch.commentary === 'boolean') {
+    if (source.commentary) {
+      void ensureExtraPlayer(source)
+    } else {
+      destroyExtraPlayer(id)
+      source.blocked = false
+      source.audioError = ''
+    }
+  }
+}
+
+export function removeSource(id: string) {
+  stopSourceConnection(id)
+  destroyExtraPlayer(id)
+  const i = store.sources.findIndex((s) => s.id === id)
+  if (i >= 0) store.sources.splice(i, 1)
+  persistSources()
+}
+
+export function retrySource(id: string) {
+  const source = store.sources.find((s) => s.id === id)
+  if (!source) return
+  source.error = ''
+  const buvid = getCookieValue('buvid3')
+  const client = extraClients.get(id)
+  if (client) client.retry(store.account.mid || 0, buvid)
+  else if (store.view === 'live') connectSource(source)
+  if (source.commentary) {
+    // 混音播放器出错 / 被浏览器拦下时，手动重试要重建一次；
+    // 正常播放中的连接不打断。
+    if (extraPlayers.has(id) && (source.audioError || source.blocked)) {
+      destroyExtraPlayer(id)
+    }
+    if (!extraPlayers.has(id) && !extraPlayerPending.has(id)) {
+      source.audioError = ''
+      source.blocked = false
+      void ensureExtraPlayer(source)
+    }
+  }
+}
+
+export function roomIdForSource(sourceId?: string): number {
+  if (!sourceId || sourceId === 'a') return store.a.roomId
+  // 来源被移除后返回 0，调用方应提示用户，而不是误发到主房间
+  return store.sources.find((s) => s.id === sourceId)?.roomId || 0
+}
+
+export async function reportMessage(target: ChatMsg, reason: number): Promise<ReportResult> {
+  if (!target.dmid) return { ok: false, message: '这条弹幕缺少可举报的编号' }
+  const roomId = target.sourceRoomId || roomIdForSource(target.sourceId)
+  if (!roomId) return { ok: false, message: '找不到来源直播间' }
+  return reportDanmaku(roomId, target.dmid, reason)
 }
 
 /* ---------- 发弹幕 ---------- */
@@ -873,7 +1390,11 @@ export function canInteract(target: ChatMsg | null): boolean {
   return !!target && target.kind === 'danmu' && !target.self
 }
 
-export async function send(text: string, replyTarget?: ChatMsg | null): Promise<boolean> {
+export async function send(
+  text: string,
+  replyTarget?: ChatMsg | null,
+  targetSourceId?: string
+): Promise<boolean> {
   if (store.sendState.sending) return false
   const raw = text.trim().replace(/[\r\n]+/g, ' ')
   if (!raw) return false
@@ -886,28 +1407,37 @@ export async function send(text: string, replyTarget?: ChatMsg | null): Promise<
     store.sendState.error = `刚发过，等 ${Math.ceil((store.sendState.cooldownUntil - now) / 1000)} 秒再发`
     return false
   }
+  const sourceId = targetSourceId || replyTarget?.sourceId || 'a'
+  const roomId = roomIdForSource(sourceId)
+  if (!roomId) {
+    store.sendState.error = '这条弹幕的来源直播间已被移除'
+    return false
+  }
   const final = replyTarget ? buildReply(raw, replyTarget) : raw.slice(0, LIMIT)
   if (!final) return false
   store.sendState.sending = true
   store.sendState.error = ''
   try {
-    const r = await sendDanmaku(store.a.roomId, final)
+    const r = await sendDanmaku(roomId, final)
     if (!r.ok) {
       store.sendState.error = r.message
       return false
     }
-    const mine: ChatMsg = {
-      seq: 900000000 + ++pushSeq,
-      kind: 'danmu',
-      text: final,
-      uname: store.account.name || '我',
-      uid: store.account.mid || undefined,
-      color: 0xffffff,
-      self: true,
-    }
+    const mine = enrichMessage(
+      {
+        seq: 900000000 + ++pushSeq,
+        kind: 'danmu',
+        text: final,
+        uname: store.account.name || '我',
+        uid: store.account.mid || undefined,
+        color: 0xffffff,
+        self: true,
+      },
+      sourceId
+    )
     // 先插本地，再登记回显窗口；pushMessage 对 self 消息会查这个窗口
     pushMessage(mine)
-    pendingSelfEcho.push({ text: final, until: Date.now() + SELF_ECHO_WINDOW })
+    pendingSelfEcho.push({ text: final, roomId, until: Date.now() + SELF_ECHO_WINDOW })
     store.sendState.sentSeq++
     store.sendState.lastOkAt = Date.now()
     store.sendState.cooldownUntil = Date.now() + SEND_COOLDOWN
@@ -923,7 +1453,7 @@ export async function send(text: string, replyTarget?: ChatMsg | null): Promise<
 export async function plusOne(target: ChatMsg): Promise<boolean> {
   if (!canInteract(target)) return false
   const text = target.text.trim()
-  return send(text.length <= LIMIT ? text : '+1')
+  return send(text.length <= LIMIT ? text : '+1', null, target.sourceId)
 }
 
 export function clearSendError() {
@@ -943,9 +1473,7 @@ export async function finishLogin(cookieStr: string) {
   }
   store.loggedIn = true
   writeJson('dc_account', store.account)
-  if (store.view === 'live') {
-    danmaku.retry(store.account.mid || 0, getCookieValue('buvid3'))
-  }
+  if (store.view === 'live') retryDanmaku()
 }
 
 export async function logout() {
@@ -954,7 +1482,7 @@ export async function logout() {
   store.loggedIn = false
   store.account = { mid: 0, name: '', avatar: '', level: 0 }
   writeJson('dc_account', store.account)
-  if (store.view === 'live') danmaku.retry(0, '')
+  if (store.view === 'live') retryDanmaku()
 }
 
 export async function refreshProfile() {
@@ -1120,6 +1648,13 @@ export function debugSnapshot() {
     players: { a: !!playerA, b: !!playerB },
     messages: store.messages.length,
     danmaku: store.danmakuStatus,
+    sources: store.sources.map((s) => ({
+      roomId: s.roomId,
+      status: s.status,
+      commentary: s.commentary,
+      audio: extraPlayers.has(s.id),
+      audioError: s.audioError,
+    })),
     playing: store.playing,
   }
 }

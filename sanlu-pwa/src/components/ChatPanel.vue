@@ -12,7 +12,7 @@ import {
 import type { ChatMsg } from '../lib/danmaku'
 import AppIcon from './AppIcon.vue'
 
-const emit = defineEmits<{ collapse: []; login: [] }>()
+const emit = defineEmits<{ collapse: []; login: []; import: [] }>()
 
 const listEl = ref<HTMLElement | null>(null)
 const focusInput = ref<HTMLInputElement | null>(null)
@@ -30,11 +30,20 @@ const LIMIT = 20
 
 const statusLabel = computed(() => {
   const s = store.danmakuStatus
-  if (s === 'open') return store.viewer > 0 ? `${formatViewer(store.viewer)}人气` : '已连接'
-  if (s === 'reconnecting') return '弹幕重连中…'
-  if (s === 'connecting') return '弹幕连接中…'
-  if (s === 'failed') return '弹幕连接失败'
-  return '弹幕未连接'
+  const extra = store.sources.length ? ` · +${store.sources.length}路` : ''
+  if (s === 'open') return (store.viewer > 0 ? `${formatViewer(store.viewer)}人气` : '已连接') + extra
+  if (s === 'reconnecting') return '弹幕重连中…' + extra
+  if (s === 'connecting') return '弹幕连接中…' + extra
+  if (s === 'failed') return '弹幕连接失败' + extra
+  return '弹幕未连接' + extra
+})
+
+const showSourceBadges = computed(() => store.sources.length > 0)
+
+const sendRoomLabel = computed(() => {
+  const id = replyTarget.value?.sourceId
+  if (id && id !== 'a') return replyTarget.value?.sourceName || '导入直播间'
+  return store.a.uname || '主直播间'
 })
 
 const inputLimit = computed(() =>
@@ -231,6 +240,9 @@ defineExpose({ focus: () => focusInput.value?.focus() })
           {{ statusLabel }}
         </small>
       </div>
+      <button class="import-btn" title="导入更多直播间的弹幕 / 解说" @click="emit('import')">
+        <AppIcon name="plus" :size="16" />
+      </button>
       <button class="collapse" title="收起聊天室" @click="emit('collapse')">
         <AppIcon name="chevron-down" :size="18" />
       </button>
@@ -266,6 +278,15 @@ defineExpose({ focus: () => focusInput.value?.focus() })
           </div>
           <div class="sc-main">
             <div class="sc-meta">
+              <span
+                v-if="showSourceBadges && m.sourceColor"
+                class="src-badge"
+                :class="{ dot: !m.badge }"
+                :style="{ background: m.sourceColor }"
+                :title="m.sourceName"
+              >
+                {{ m.badge }}
+              </span>
               <strong>{{ m.uname || '匿名' }}</strong>
               <span v-if="m.price" class="sc-price">¥{{ m.price }}</span>
               <span class="sc-label">SC</span>
@@ -287,6 +308,15 @@ defineExpose({ focus: () => focusInput.value?.focus() })
 
         <div v-else class="row-wrap">
           <div :class="rowClass(m)" @click="onTap(m)">
+            <span
+              v-if="showSourceBadges && m.sourceColor"
+              class="src-badge"
+              :class="{ dot: !m.badge }"
+              :style="{ background: m.sourceColor }"
+              :title="m.sourceName"
+            >
+              {{ m.badge }}
+            </span>
             <span class="name" :class="{ self: m.self }">{{ m.self ? '我' : m.uname || '匿名' }}</span>
             <span v-if="m.medal" class="medal">{{ m.medal }}</span>
             <span v-if="m.replyTo" class="reply-tag">
@@ -371,7 +401,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
         <span class="count">
           {{ replyTarget && input ? preview.length : input.length }}/{{ inputLimit }}
         </span>
-        <span class="to-room">发到 A 房间 · {{ store.a.uname || '主直播间' }}</span>
+        <span class="to-room">发到 · {{ sendRoomLabel }}</span>
         <span v-if="hint" class="hint">{{ hint }}</span>
         <span v-else-if="store.sendState.error" class="send-err">{{ store.sendState.error }}</span>
       </div>
@@ -483,7 +513,8 @@ defineExpose({ focus: () => focusInput.value?.focus() })
   margin: 0 2px;
 }
 
-.collapse {
+.collapse,
+.import-btn {
   border: 1px solid var(--line);
   background: var(--surface);
   color: var(--text-dim);
@@ -494,6 +525,37 @@ defineExpose({ focus: () => focusInput.value?.focus() })
   flex: 0 0 auto;
   display: grid;
   place-items: center;
+}
+
+.import-btn {
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: transparent;
+}
+
+/* 多路弹幕来源气泡 */
+.src-badge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 5px;
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 750;
+  line-height: 1;
+  vertical-align: 1px;
+  margin-right: 4px;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.25);
+}
+
+.src-badge.dot {
+  min-width: 8px;
+  width: 8px;
+  height: 14px;
+  padding: 0;
+  border-radius: 999px;
 }
 
 .list {

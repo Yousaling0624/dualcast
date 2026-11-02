@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sanlu-pwa/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - 'sanlu-pwa/**'
+      - '.github/workflows/ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: sanlu-pwa/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sanlu-pwa
+        run: npm ci
+
+      - name: Type check
+        working-directory: sanlu-pwa
+        run: npm run typecheck
+
+      - name: Unit tests
+        working-directory: sanlu-pwa
+        run: npm test
+
+      - name: Build
+        working-directory: sanlu-pwa
+        run: npm run build

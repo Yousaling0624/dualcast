@@ -4,10 +4,21 @@
  *
  * 流量原则：浏览器优先直连 B 站 CDN（页面 referrer=no-referrer）；
  * 直连失败再走中转的 /stream 兜底。
+ *
+ * 音画偏移：直播无法往回 seek，所以「让这一路晚 N 毫秒」靠暂停 N 毫秒，
+ * 让直播缓冲自然长出来；「让这一路早一点」则 seek 到缓冲更靠后的位置。
  */
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
 import { getRelayBase } from './net'
+import {
+  LIVE_EDGE_LATENCY,
+  MAX_OFFSET_MS,
+  measuredLatencyMs,
+  nextPauseDeadline,
+  offsetAction,
+  remainingPauseMs,
+} from './sync'
 
 export interface StreamSet {
   flv: string[]
@@ -31,10 +42,6 @@ export function supportsFlv(): boolean {
   }
 }
 
-/** 常规播放时保持在直播边缘之后约 1.2 秒，给抖动留余量 */
-const LIVE_EDGE_LATENCY = 1.2
-const MAX_OFFSET = 5000
-
 export class StreamPlayer {
   private video: HTMLVideoElement
   private urls: StreamSet
@@ -48,12 +55,14 @@ export class StreamPlayer {
   private state: PlayState = 'stopped'
   private muted = true
   private nativeErr: (() => void) | null = null
-  /** 正值表示这一路应该比另一路晚（单位 ms），由 store 的混音面板调节 */
-  private syncOffset = 0
+  /** 正值表示这一路应该额外落后直播边缘多少毫秒，由 store 的混音面板调节 */
+  private desiredOffset = 0
   /** 用户主动暂停：对齐用的临时暂停不能把它顶掉 */
   private userPaused = false
+  /** 正在为「增加延迟」而主动暂停 */
   private syncPaused = false
   private syncTimer: number | null = null
+  private pauseDeadline = 0
 
   constructor(
     video: HTMLVideoElement,
@@ -220,10 +229,11 @@ export class StreamPlayer {
   /**
    * 直播追帧 + 手动音画偏移。
    *
-   * 目标位置 = 缓冲末端 - 1.2s - syncOffset。
-   * 小偏差用 playbackRate 慢慢追，避免每秒 seek 造成卡顿；
-   * 大偏差直接 seek。偏移太大、目标还没进缓冲时，临时暂停一会儿，
-   * 让直播缓冲往前走，再恢复到目标位置（等价于把这一路往后推 N 秒）。
+   * 关键点：直播不能往回无限 seek。要把某一路往后推 N 毫秒，
+   * 就把它暂停 N 毫秒，让缓冲继续增长；恢复后它就永久落后 N 毫秒。
+   * 要把延迟减小，则直接 seek 到缓冲里更靠后的位置。
+   *
+   * 小偏差用 playbackRate 慢慢追，避免每秒 seek 造成卡顿。
    */
   private startKeepalive() {
     this.stopKeepalive()
@@ -253,17 +263,33 @@ export class StreamPlayer {
     }
     if (end <= start) return
 
-    const target = end - LIVE_EDGE_LATENCY - this.syncOffset / 1000
-    if (target < start - 0.15) {
-      // 目标位置还没进缓冲区：先暂停，等缓冲把这段补出来
-      if (force) this.pauseForSync(start - target)
+    // 实测「相对直播边缘已经落后多少」，再和用户目标比较
+    const measured = measuredLatencyMs(v.currentTime, end)
+    const action = offsetAction(this.desiredOffset, measured)
+
+    if (action.kind === 'pause') {
+      // 还差一段延迟：暂停这一路，让直播缓冲往前跑
+      this.scheduleSyncPause(action.ms)
       return
     }
 
-    const desired = Math.min(Math.max(target, start + 0.1), end - 0.5)
-    const drift = v.currentTime - desired
+    if (action.kind === 'seek') {
+      // 用户刚调小延迟 → 立即跳进缓冲里更靠后的位置；
+      // 平时守边的轻微偏差用 1.06 倍速慢慢追，避免每秒 seek 卡顿。
+      if (!force && action.ms < 2200) {
+        if (v.playbackRate !== 1.06) v.playbackRate = 1.06
+        return
+      }
+      const target = this.clampTarget(end - LIVE_EDGE_LATENCY - this.desiredOffset / 1000, start, end)
+      if (Math.abs(v.currentTime - target) > 0.03) v.currentTime = target
+      if (v.playbackRate !== 1) v.playbackRate = 1
+      return
+    }
+
+    const target = this.clampTarget(end - LIVE_EDGE_LATENCY - this.desiredOffset / 1000, start, end)
+    const drift = v.currentTime - target
     if (Math.abs(drift) > 2.2) {
-      v.currentTime = desired
+      v.currentTime = target
       v.playbackRate = 1
     } else if (Math.abs(drift) > 0.22) {
       const rate = drift > 0 ? 0.94 : 1.06
@@ -273,15 +299,41 @@ export class StreamPlayer {
     }
   }
 
-  /** 目标比缓冲起点还早时，暂停这一路，让直播缓冲往前跑一段时间 */
-  private pauseForSync(missingSeconds: number) {
-    if (this.syncPaused || this.userPaused) return
-    const wait = Math.round(Math.min(5000, Math.max(250, missingSeconds * 1000)))
-    this.cancelSyncPause()
+  private clampTarget(target: number, start: number, end: number): number {
+    return Math.min(Math.max(target, start + 0.05), end - 0.35)
+  }
+
+  /** 暂停 ms 毫秒来增加延迟；连续调滑杆时在现有截止时间上累加 */
+  private scheduleSyncPause(ms: number) {
+    if (this.userPaused || this.state === 'stopped' || this.video.paused) return
+    const now = performance.now()
+    this.pauseDeadline = nextPauseDeadline(now, this.pauseDeadline, Math.min(MAX_OFFSET_MS, ms))
     this.syncPaused = true
     this.video.pause()
+    if (this.video.playbackRate !== 1) this.video.playbackRate = 1
+    this.armPauseTimer()
+  }
+
+  /** 暂停过程中用户又调大了延迟：延长暂停时间，不打断/不重复 pause() */
+  private extendSyncPause(ms: number) {
+    const now = performance.now()
+    this.pauseDeadline = nextPauseDeadline(now, this.pauseDeadline, Math.min(MAX_OFFSET_MS, ms))
+    this.armPauseTimer()
+  }
+
+  private armPauseTimer() {
+    if (this.syncTimer) {
+      clearTimeout(this.syncTimer)
+      this.syncTimer = null
+    }
+    const left = remainingPauseMs(performance.now(), this.pauseDeadline)
     this.syncTimer = window.setTimeout(() => {
       this.syncTimer = null
+      const rest = remainingPauseMs(performance.now(), this.pauseDeadline)
+      if (rest > 5) {
+        this.armPauseTimer()
+        return
+      }
       this.syncPaused = false
       if (this.state === 'stopped' || this.userPaused) return
       const p = this.video.play()
@@ -290,8 +342,8 @@ export class StreamPlayer {
           if ((e as DOMException)?.name === 'NotAllowedError') this.onBlocked()
         })
       }
-      window.setTimeout(() => this.syncNow(true), 250)
-    }, wait)
+      window.setTimeout(() => this.syncNow(true), 200)
+    }, left)
   }
 
   private cancelSyncPause() {
@@ -299,6 +351,7 @@ export class StreamPlayer {
       clearTimeout(this.syncTimer)
       this.syncTimer = null
     }
+    this.pauseDeadline = 0
     this.syncPaused = false
   }
 
@@ -357,8 +410,20 @@ export class StreamPlayer {
   }
 
   setSyncOffset(ms: number) {
-    this.syncOffset = Math.max(-MAX_OFFSET, Math.min(MAX_OFFSET, ms))
-    // 用户刚调完偏移，立刻对齐一次；缓冲区还没跟上时 syncNow 会安排补齐
+    const next = Math.max(-MAX_OFFSET_MS, Math.min(MAX_OFFSET_MS, Math.round(ms)))
+    const delta = next - this.desiredOffset
+    this.desiredOffset = next
+    if (this.state === 'stopped') return
+
+    // 正在为延迟而暂停：继续调大就顺延，调小则让这次暂停走完，
+    // 恢复后 syncNow 会 seek 到新目标。
+    if (this.syncPaused) {
+      if (delta > 0) this.extendSyncPause(delta)
+      return
+    }
+    if (this.userPaused) return
+
+    // 立刻按实测偏差执行：加延迟会暂停，减延迟会向前跳。
     this.syncNow(true)
   }
 
@@ -367,7 +432,7 @@ export class StreamPlayer {
       const n = this.video.buffered.length
       if (n) {
         this.video.currentTime =
-          this.video.buffered.end(n - 1) - LIVE_EDGE_LATENCY - this.syncOffset / 1000
+          this.video.buffered.end(n - 1) - LIVE_EDGE_LATENCY - this.desiredOffset / 1000
       }
     } catch {
       /* noop */

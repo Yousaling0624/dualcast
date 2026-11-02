@@ -31,6 +31,8 @@ type IconName =
   | 'github'
   | 'clock'
   | 'sparkles'
+  | 'crop'
+  | 'flag'
   | 'more'
 
 const props = withDefaults(
@@ -96,6 +98,10 @@ const paths: Record<IconName, string[]> = {
   sparkles: [
     'M19 9l1.25-2.75L23 5l-2.75-1.25L19 1l-1.25 2.75L15 5l2.75 1.25L19 9zm-7.5.5L9 4 6.5 9.5 1 12l5.5 2.5L9 20l2.5-5.5L17 12l-5.5-2.5zM19 15l-1.25 2.75L15 19l2.75 1.25L19 23l1.25-2.75L23 19l-2.75-1.25L19 15z',
   ],
+  crop: [
+    'M7 3H5v2H3v2h2v10a2 2 0 0 0 2 2h10v2h2v-2h2v-2h-2V7a2 2 0 0 0-2-2H7V3zm0 4h10v10H7V7z',
+  ],
+  flag: ['M14.4 6 14 4H5v17h2v-7h5.6l.4 2h7V6h-5.6z'],
   more: ['M6 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'],
 }
 

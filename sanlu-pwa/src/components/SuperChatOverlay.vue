@@ -122,6 +122,15 @@ onBeforeUnmount(clearAll)
 
         <div class="sc-content">
           <div class="sc-meta">
+            <span
+              v-if="store.sources.length && item.msg.sourceColor"
+              class="sc-src"
+              :class="{ dot: !item.msg.badge }"
+              :style="{ background: item.msg.sourceColor }"
+              :title="item.msg.sourceName"
+            >
+              {{ item.msg.badge }}
+            </span>
             <strong>{{ item.msg.uname || '匿名' }}</strong>
             <span v-if="store.settings.sc.showPrice && item.msg.price" class="sc-price">
               ¥{{ item.msg.price }}
@@ -225,6 +234,28 @@ onBeforeUnmount(clearAll)
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.sc-src {
+  flex: 0 0 auto;
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 5px;
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.sc-src.dot {
+  min-width: 8px;
+  width: 8px;
+  height: 14px;
+  padding: 0;
+  border-radius: 999px;
 }
 
 .sc-meta strong {

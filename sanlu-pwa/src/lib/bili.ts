@@ -440,6 +440,75 @@ export async function sendDanmaku(roomId: number, text: string): Promise<SendRes
   return { ok: false, message: sendErrorText(code, message) }
 }
 
+/* ---------- 举报弹幕 ---------- */
+
+export interface ReportResult {
+  ok: boolean
+  message: string
+  /** 接口不可用时，界面可以引导用户去原直播间举报 */
+  unsupported?: boolean
+}
+
+/**
+ * 举报直播弹幕。B 站没有公开文档的直播举报接口，这里走直播间网页端使用的路径；
+ * 如果接口不可用（中转 404 / 未登录等），把结果如实返回给界面。
+ */
+export async function reportDanmaku(
+  roomId: number,
+  dmid: string,
+  reason: number,
+  note = ''
+): Promise<ReportResult> {
+  if (!hasCookie()) return { ok: false, message: '先登录 B 站账号才能举报' }
+  const csrf = getCookieValue('bili_jct')
+  if (!csrf) return { ok: false, message: '登录态不完整，重新扫码登录试试' }
+  if (!roomId || !dmid) return { ok: false, message: '这条弹幕缺少可举报的编号' }
+
+  const body = new URLSearchParams({
+    roomid: String(roomId),
+    dmid: String(dmid),
+    reason: String(reason),
+    content: note,
+    csrf,
+    csrf_token: csrf,
+  })
+
+  try {
+    const r = await requestJson('live', 'xlive/web-ucenter/v1/danmaku/report', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    })
+    const code = Number(r?.code ?? -1)
+    if (code === 0) return { ok: true, message: '已提交举报，等待 B 站处理' }
+    return { ok: false, message: reportErrorText(code, String(r?.message || r?.msg || '')) }
+  } catch (e) {
+    return {
+      ok: false,
+      unsupported: true,
+      message: e instanceof Error ? e.message : '举报接口暂不可用',
+    }
+  }
+}
+
+function reportErrorText(code: number, raw: string): string {
+  switch (code) {
+    case -101:
+    case -111:
+      return '登录状态失效了，去设置里重新登录'
+    case -400:
+      return '举报参数不对，可能这条弹幕已经过期'
+    case 36201:
+      return '这条弹幕已经不存在了'
+    case 36203:
+      return '举报原因不合法，换一个原因试试'
+    case 36204:
+      return '你已经举报过这条弹幕了'
+    default:
+      return raw || `举报失败（${code}）`
+  }
+}
+
 function sendErrorText(code: number, raw: string): string {
   switch (code) {
     case -101:
