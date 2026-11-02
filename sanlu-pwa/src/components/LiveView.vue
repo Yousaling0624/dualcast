@@ -9,6 +9,7 @@ import {
   canInteract,
   clearSendError,
   exitSession,
+  leavePlayer,
   plusOne,
   reconnect,
   removeSource,
@@ -212,8 +213,8 @@ function reveal() {
   exitMiniImmersive()
   if (hideTimer) clearTimeout(hideTimer)
   hideTimer = window.setTimeout(() => {
-    // 快捷回复 / 多路面板还开着时不自动收，避免打字打一半控件消失
-    if (quickTarget.value || multiOpen.value) return
+    // 快捷回复 / 多路面板 / 更多菜单还开着时不自动收，避免打字打一半控件消失
+    if (quickTarget.value || multiOpen.value || moreOpen.value) return
     hideControls()
   }, 4600)
 }
@@ -222,6 +223,7 @@ function hideControls() {
   controls.value = false
   qualityOpen.value = false
   multiOpen.value = false
+  moreOpen.value = false
   // 主画面控件和小窗按钮统一成一套沉浸状态：收就一起收
   if (miniOn.value && !miniExpanded.value) miniImmersive.value = true
   if (hideTimer) {
@@ -343,6 +345,11 @@ function goBack() {
   }
   if (isFullscreen.value) {
     void toggleFullscreen()
+    return
+  }
+  // 回主页不打断播放：声音、弹幕、多路都留在后台，首页会出现「正在播放」条
+  if (store.sessionActive) {
+    leavePlayer()
     return
   }
   exitSession()
@@ -881,9 +888,56 @@ function updateMultiFade() {
 function toggleMultiPanel() {
   multiOpen.value = !multiOpen.value
   if (multiOpen.value) {
+    moreOpen.value = false
     reveal()
     nextTick(updateMultiFade)
   }
+}
+
+/* ---------- 底栏发弹幕 + 更多功能（二级菜单） ---------- */
+
+const moreOpen = ref(false)
+const dockText = ref('')
+const dockHint = ref('')
+let dockHintTimer: number | null = null
+
+function showDockHint(text: string) {
+  dockHint.value = text
+  if (dockHintTimer) clearTimeout(dockHintTimer)
+  dockHintTimer = window.setTimeout(() => {
+    dockHintTimer = null
+    dockHint.value = ''
+  }, 4200)
+}
+
+async function dockSend() {
+  const text = dockText.value.trim()
+  if (!text || store.sendState.sending) return
+  if (!store.loggedIn) {
+    showDockHint('先登录 B 站账号才能发弹幕')
+    return
+  }
+  const ok = await send(text)
+  if (ok) {
+    dockText.value = ''
+    dockHint.value = ''
+  } else {
+    showDockHint(store.sendState.error || '发送失败')
+  }
+}
+
+function toggleMore() {
+  moreOpen.value = !moreOpen.value
+  if (moreOpen.value) {
+    multiOpen.value = false
+    reveal()
+  }
+}
+
+function moreAct(fn: () => void | Promise<unknown>) {
+  moreOpen.value = false
+  reveal()
+  void fn()
 }
 
 watch(
@@ -1018,6 +1072,17 @@ onMounted(() => {
   reveal()
 })
 
+// 从主页「回到播放」时重新亮出控件（后台播放期间 LiveView 一直挂着，onMounted 不会再跑）
+watch(
+  () => store.view,
+  (v) => {
+    if (v === 'live') {
+      reveal()
+      nextTick(syncZoneSize)
+    }
+  }
+)
+
 onBeforeUnmount(() => {
   document.removeEventListener('fullscreenchange', onFsChange)
   window.removeEventListener('keydown', onKey)
@@ -1025,6 +1090,7 @@ onBeforeUnmount(() => {
   zoneObserver?.disconnect()
   zoneObserver = null
   if (hideTimer) clearTimeout(hideTimer)
+  if (dockHintTimer) clearTimeout(dockHintTimer)
   clearMiniTap()
   exitMiniImmersive()
   cancelHoverClose()
@@ -1180,23 +1246,35 @@ onBeforeUnmount(() => {
         </div>
       </Transition>
 
-      <!-- 底部控制条 -->
+      <!-- 底部控制条：播放 + 直接发弹幕 + 常用开关，其余都收进「更多」二级菜单 -->
       <Transition name="up">
         <div v-if="controls" class="bottombar">
           <button class="dock-play" :title="store.playing ? '暂停' : '播放'" @click="togglePlay">
             <AppIcon :name="store.playing ? 'pause' : 'play'" :size="18" />
             <span>{{ store.playing ? '暂停' : '播放' }}</span>
           </button>
-          <span class="dock-sep"></span>
-          <button
-            class="dock-btn"
-            title="切换 A / B 画面"
-            :disabled="store.swapping"
-            @click="swap"
-          >
-            <AppIcon name="swap" :size="17" />
-            <span>{{ store.swapping ? '切换中' : '切画面' }}</span>
-          </button>
+
+          <div class="dock-compose" :class="{ disabled: !store.loggedIn }">
+            <input
+              v-model="dockText"
+              class="dock-input"
+              :maxlength="20"
+              :placeholder="store.loggedIn ? '发个弹幕…' : '登录后发弹幕'"
+              enterkeyhint="send"
+              aria-label="发弹幕"
+              @focus="dockHint = ''"
+              @keydown.enter="(e) => !e.isComposing && dockSend()"
+            />
+            <button
+              class="dock-send"
+              title="发送弹幕"
+              :disabled="!dockText.trim() || store.sendState.sending"
+              @click="dockSend"
+            >
+              <AppIcon name="send" :size="15" />
+            </button>
+          </div>
+
           <button
             class="dock-btn"
             :class="{ on: store.settings.danmaku.enabled }"
@@ -1217,28 +1295,12 @@ onBeforeUnmount(() => {
           </button>
           <button
             class="dock-btn"
-            :class="{ on: store.settings.sc.enabled }"
-            title="SC 悬浮窗"
-            @click="toggleSc"
+            :class="{ on: moreOpen }"
+            title="更多功能：切画面、SC、混音、画面、画中画、设置"
+            @click="toggleMore"
           >
-            <AppIcon name="sc" :size="17" />
-            <span>SC</span>
-          </button>
-          <button class="dock-btn dock-optional dock-mix" title="混音与延迟" @click="openSettings('mix')">
-            <AppIcon name="tune" :size="17" />
-            <span>混音</span>
-          </button>
-          <button class="dock-btn dock-optional dock-video" title="画面设置" @click="openSettings('video')">
-            <AppIcon name="quality" :size="17" />
-            <span>画面</span>
-          </button>
-          <button class="dock-btn" title="画中画" @click="enterPip">
-            <AppIcon name="pip" :size="17" />
-            <span>画中画</span>
-          </button>
-          <button class="dock-btn" title="设置" @click="openSettings('account')">
-            <AppIcon name="settings" :size="17" />
-            <span>设置</span>
+            <AppIcon name="more" :size="17" />
+            <span>更多</span>
           </button>
           <button
             class="dock-btn dock-fs"
@@ -1248,6 +1310,78 @@ onBeforeUnmount(() => {
             <AppIcon :name="isFullscreen ? 'fullscreen-exit' : 'fullscreen'" :size="17" />
             <span>{{ isFullscreen ? '退出' : '全屏' }}</span>
           </button>
+
+          <div v-if="dockHint" class="dock-hint" @pointerdown.stop @click.stop>
+            <AppIcon name="warning" :size="13" />
+            <span>{{ dockHint }}</span>
+            <button v-if="!store.loggedIn" @click="openSettings('account')">去登录</button>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 更多功能（二级菜单） -->
+      <Transition name="fade">
+        <div v-if="moreOpen" class="more-layer" @pointerdown.stop @click.stop>
+          <div class="more-scrim" @click="moreOpen = false"></div>
+          <div class="more-sheet" role="dialog" aria-label="更多功能">
+            <div class="more-head">
+              <span class="more-title"><AppIcon name="more" :size="15" />更多功能</span>
+              <button class="more-x" title="关闭" @click="moreOpen = false">
+                <AppIcon name="close" :size="16" />
+              </button>
+            </div>
+            <div class="more-grid">
+              <button class="more-item" :disabled="store.swapping" @click="moreAct(swap)">
+                <span class="mi-icon"><AppIcon name="swap" :size="18" /></span>
+                <span class="mi-text">
+                  <strong>切画面</strong>
+                  <small>{{ store.swapping ? '切换中…' : 'A / B 互换' }}</small>
+                </span>
+              </button>
+              <button class="more-item" @click="moreAct(toggleSc)">
+                <span class="mi-icon"><AppIcon name="sc" :size="18" /></span>
+                <span class="mi-text">
+                  <strong>SC 悬浮窗</strong>
+                  <small>{{ store.settings.sc.enabled ? '已开启' : '已关闭' }}</small>
+                </span>
+              </button>
+              <button class="more-item" @click="moreAct(() => openSettings('mix'))">
+                <span class="mi-icon"><AppIcon name="tune" :size="18" /></span>
+                <span class="mi-text">
+                  <strong>混音 / 延迟</strong>
+                  <small>音量与对齐</small>
+                </span>
+              </button>
+              <button class="more-item" @click="moreAct(() => openSettings('video'))">
+                <span class="mi-icon"><AppIcon name="quality" :size="18" /></span>
+                <span class="mi-text">
+                  <strong>画面设置</strong>
+                  <small>比例与清晰度</small>
+                </span>
+              </button>
+              <button class="more-item" @click="moreAct(enterPip)">
+                <span class="mi-icon"><AppIcon name="pip" :size="18" /></span>
+                <span class="mi-text">
+                  <strong>画中画</strong>
+                  <small>系统悬浮小窗</small>
+                </span>
+              </button>
+              <button class="more-item" @click="moreAct(() => openSettings('danmaku'))">
+                <span class="mi-icon"><AppIcon name="danmaku" :size="18" /></span>
+                <span class="mi-text">
+                  <strong>弹幕设置</strong>
+                  <small>字号 / 速度 / 屏蔽</small>
+                </span>
+              </button>
+              <button class="more-item wide" @click="moreAct(() => openSettings('account'))">
+                <span class="mi-icon"><AppIcon name="settings" :size="18" /></span>
+                <span class="mi-text">
+                  <strong>设置</strong>
+                  <small>账号、主题与更多</small>
+                </span>
+              </button>
+            </div>
+          </div>
         </div>
       </Transition>
 
@@ -1494,7 +1628,11 @@ onBeforeUnmount(() => {
       </div>
 
       <!-- 错误提示 -->
-      <div v-if="firstError && !quickTarget && !multiOpen" class="err-banner" @pointerdown.stop>
+      <div
+        v-if="firstError && !quickTarget && !multiOpen && !moreOpen && !dockHint"
+        class="err-banner"
+        @pointerdown.stop
+      >
         <AppIcon name="warning" :size="16" />
         <span>{{ firstError }}</span>
         <button v-if="store.danmakuStatus === 'failed'" @click="retryDanmaku">重试弹幕</button>
@@ -1558,13 +1696,12 @@ onBeforeUnmount(() => {
   background: #000;
 }
 
-/* 全屏时底栏铺满整行，按钮均匀分布，避免右侧挤成一团、左边一大片空 */
+/* 全屏时底栏不再铺满整行，收成居中的一条，中间留给弹幕输入框 */
 .video-zone:fullscreen .bottombar {
-  left: calc(clamp(8px, 1vw, 14px) + var(--safe-left));
-  right: calc(clamp(8px, 1vw, 14px) + var(--safe-right));
-  width: auto;
-  max-width: none;
-  transform: none;
+  left: 50%;
+  right: auto;
+  width: min(760px, calc(100% - 24px));
+  transform: translateX(-50%);
 }
 
 /* 全屏底栏更高，提示条跟着抬高，别压到按钮上 */
@@ -1844,7 +1981,7 @@ onBeforeUnmount(() => {
   bottom: calc(8px + var(--safe-bottom));
   display: flex;
   align-items: stretch;
-  gap: 2px;
+  gap: 4px;
   padding: 4px 6px;
   border-radius: 18px;
   background: linear-gradient(180deg, rgba(30, 27, 23, 0.78), rgba(16, 14, 12, 0.72));
@@ -1852,7 +1989,6 @@ onBeforeUnmount(() => {
   box-shadow: 0 14px 38px rgba(0, 0, 0, 0.36);
   backdrop-filter: blur(22px) saturate(1.15);
   z-index: 5;
-  justify-content: space-between;
 }
 
 /* 每个按钮都是「图标 + 短文字」，不用猜图标是什么意思 */
@@ -1884,13 +2020,102 @@ onBeforeUnmount(() => {
   transform: scale(0.96);
 }
 
-.dock-sep {
-  width: 1px;
-  height: 26px;
-  background: rgba(255, 255, 255, 0.13);
-  margin: 0 3px;
-  flex: 0 0 auto;
+/* 底栏直接发弹幕：输入框吃掉剩余宽度，回车 / 发送键发送 */
+.dock-compose {
+  flex: 1 1 180px;
+  min-width: 0;
+  max-width: 360px;
+  height: 38px;
   align-self: center;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px 0 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  transition:
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.dock-compose:focus-within {
+  border-color: rgba(217, 119, 87, 0.55);
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.dock-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: #fff8ef;
+  font-size: 13px;
+  outline: none;
+}
+
+.dock-input::placeholder {
+  color: rgba(255, 248, 239, 0.5);
+}
+
+.dock-compose.disabled .dock-input::placeholder {
+  color: rgba(255, 248, 239, 0.36);
+}
+
+.dock-send {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+
+.dock-send:disabled {
+  opacity: 0.4;
+}
+
+/* 发送失败 / 未登录时，在底栏上方浮一条提示 */
+.dock-hint {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(100% + 6px);
+  z-index: 2;
+  /* 底栏是定位父级，不写 max-content 的话可用宽度只有左半截，提示会被截断 */
+  width: max-content;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: min(420px, calc(100vw - 24px));
+  padding: 7px 8px 7px 10px;
+  border-radius: 12px;
+  background: rgba(88, 38, 33, 0.95);
+  border: 1px solid rgba(255, 158, 140, 0.32);
+  color: #ffe9e2;
+  font-size: 11px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+}
+
+.dock-hint span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-hint button {
+  flex: 0 0 auto;
+  border: none;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 10.5px;
+  cursor: pointer;
 }
 
 .dock-btn {
@@ -1944,6 +2169,130 @@ onBeforeUnmount(() => {
 
 .dock-btn:disabled {
   opacity: 0.45;
+}
+
+/* ---------- 更多功能（二级菜单） ---------- */
+
+.more-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.more-scrim {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+.more-sheet {
+  position: relative;
+  width: min(560px, calc(100% - 16px));
+  max-height: min(72vh, calc(100dvh - 70px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin-bottom: calc(8px + var(--safe-bottom));
+  padding: 12px;
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(32, 29, 25, 0.97), rgba(16, 14, 12, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(20px);
+  color: #fff8ef;
+}
+
+.more-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px 10px;
+}
+
+.more-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.more-x {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 248, 239, 0.75);
+  cursor: pointer;
+}
+
+.more-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.more-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff8ef;
+  text-align: left;
+  cursor: pointer;
+}
+
+.more-item:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.more-item:disabled {
+  opacity: 0.5;
+}
+
+.more-item.wide {
+  grid-column: 1 / -1;
+}
+
+.mi-icon {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: rgba(217, 119, 87, 0.16);
+  color: var(--accent);
+}
+
+.mi-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.mi-text strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mi-text small {
+  font-size: 10px;
+  color: rgba(255, 248, 239, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ---------- 多路快捷面板 ---------- */
@@ -2894,18 +3243,17 @@ onBeforeUnmount(() => {
 /* 手机、小窗和横屏短屏：底部只留一排图标，绝不横向滚动 */
 @media (max-width: 720px), (max-height: 500px) and (orientation: landscape) {
   .bottombar {
-    gap: 1px;
+    gap: 3px;
     padding: 3px;
     border-radius: 15px;
   }
 
   .dock-btn {
-    flex: 1 1 0;
-    min-width: 0;
-    max-width: 58px;
+    flex: 0 0 auto;
+    min-width: 36px;
     height: 44px;
     gap: 2px;
-    padding: 1px;
+    padding: 1px 3px;
     justify-content: center;
     font-size: 9px;
   }
@@ -2914,21 +3262,30 @@ onBeforeUnmount(() => {
     flex: 0 0 auto;
     min-width: 44px;
     height: 44px;
-    padding: 1px 3px;
+    padding: 1px 4px;
     border-radius: 12px;
     font-size: 9px;
   }
 
   .bottombar .dock-fs {
-    flex: 0 0 46px;
-    min-width: 46px;
+    flex: 0 0 42px;
+    min-width: 42px;
     max-width: none;
     height: 44px;
   }
 
-  .dock-sep {
-    margin: 0 1px;
-    height: 22px;
+  .dock-compose {
+    flex: 1 1 auto;
+    height: 36px;
+    padding-left: 10px;
+  }
+
+  .dock-input {
+    font-size: 12.5px;
+  }
+
+  .dock-hint {
+    font-size: 10.5px;
   }
 
   .multi-pop {
@@ -2936,18 +3293,20 @@ onBeforeUnmount(() => {
   }
 }
 
-/* 手机 / 小屏横屏先收起「画面设置」，把空间留给常用按钮 */
-@media (max-width: 720px), (max-height: 500px) and (max-width: 900px) and (orientation: landscape) {
-  .bottombar .dock-video,
-  .bottombar .dock-sep {
-    display: none;
-  }
-}
-
-/* 超窄屏再把「混音」也收进设置面板，保证其余按钮够大 */
+/* 超窄屏：输入框再挤也留出位置，按钮稍微收窄 */
 @media (max-width: 350px) {
-  .bottombar .dock-mix {
-    display: none;
+  .dock-btn {
+    min-width: 32px;
+  }
+
+  .dock-play,
+  .bottombar .dock-fs {
+    min-width: 38px;
+    flex-basis: 38px;
+  }
+
+  .dock-compose {
+    padding-left: 8px;
   }
 }
 

@@ -323,6 +323,15 @@ function tick(now: number) {
   lastTick = now
   c.clearRect(0, 0, el.clientWidth, el.clientHeight)
 
+  // 回主页后播放器在后台：不画弹幕、丢弃积压，省一点 CPU / 电量
+  if (store.view !== 'live') {
+    feedBuffer.length = 0
+    items.length = 0
+    frozenSeq = 0
+    raf = requestAnimationFrame(tick)
+    return
+  }
+
   if (!d.enabled) {
     // 关闭弹幕时立刻清屏，并丢弃积压的弹幕，避免重新打开时井喷
     feedBuffer.length = 0

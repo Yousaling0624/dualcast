@@ -391,6 +391,8 @@ function persistSources() {
 
 export const store = reactive({
   view: 'home' as 'home' | 'live',
+  /** 会话是否还活着：回主页后保持播放时仍为 true，LiveView 继续挂在后台 */
+  sessionActive: false,
   a: emptySlot(),
   b: emptySlot(),
   messages: [] as ChatMsg[],
@@ -864,6 +866,7 @@ function saveRoomProfileSoon() {
 
 function beginSession() {
   destroyPlayers()
+  store.sessionActive = true
   store.view = 'live'
   store.playing = true
   store.a.blocked = false
@@ -877,7 +880,9 @@ function beginSession() {
   store.bDanmakuError = ''
   store.bDanmakuStatus = 'idle'
   store.viewer = store.a.online
-  // 播放器等 LiveView 挂载、拿到 video 元素后再绑定（见 LiveView onMounted）
+  // 首次进会话时 LiveView 还没挂载，等 onMounted 绑定后自己 attach；
+  // 从主页换一个组合再开时 LiveView 还在，这里要重新挂上新的播放地址
+  attachStreams()
   connectAllDanmaku()
   ensureAllExtraPlayers()
   saveCombo()
@@ -1367,6 +1372,7 @@ export function exitSession() {
   }
   slotStreams.a = { flv: [], hls: [] }
   slotStreams.b = { flv: [], hls: [] }
+  store.sessionActive = false
   store.view = 'home'
   store.messages = []
   store.scFeed = []
@@ -1379,7 +1385,32 @@ export function exitSession() {
   store.bDanmakuError = ''
   feedBuffer.length = 0
   releaseWakeLock()
-  if ('mediaSession' in navigator) navigator.mediaSession.metadata = null
+  try {
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = null
+      navigator.mediaSession.playbackState = 'none'
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * 回主页但保持播放：播放器和弹幕连接都不动，只把界面切回首页。
+ * 回到首页后释放屏幕常亮，手机锁屏 / 切后台时声音继续走（有系统媒体控制）。
+ */
+export function leavePlayer() {
+  if (!store.sessionActive) return
+  store.view = 'home'
+  releaseWakeLock()
+}
+
+/** 从首页的「正在播放」条回到播放器 */
+export function backToPlayer() {
+  if (!store.sessionActive) return
+  store.view = 'live'
+  if (store.playing) void requestWakeLock()
+  updateMediaSession()
 }
 
 /** 用户点击后恢复播放（解除浏览器自动播放限制） */
@@ -1392,6 +1423,7 @@ export function resumePlayback() {
   for (const source of store.sources) source.blocked = false
   for (const { player } of extraPlayers.values()) player.play()
   void requestWakeLock()
+  syncMediaSessionState()
 }
 
 export function togglePlay() {
@@ -1411,6 +1443,7 @@ export function togglePlay() {
     for (const { player } of extraPlayers.values()) player.pause()
     releaseWakeLock()
   }
+  syncMediaSessionState()
 }
 
 export function toggleDanmaku() {
@@ -1824,8 +1857,20 @@ function updateMediaSession() {
       if (store.playing) togglePlay()
     })
     navigator.mediaSession.setActionHandler('stop', () => exitSession())
+    navigator.mediaSession.playbackState = store.playing ? 'playing' : 'paused'
   } catch {
     /* 部分浏览器不支持某些 action */
+  }
+}
+
+/** 同步锁屏 / 系统媒体面板上的播放状态 */
+function syncMediaSessionState() {
+  try {
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = store.playing ? 'playing' : 'paused'
+    }
+  } catch {
+    /* ignore */
   }
 }
 

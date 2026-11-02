@@ -464,3 +464,15 @@ input[type='checkbox'] {
     scroll-behavior: auto !important;
   }
 }
+
+/* 后台播放：回主页后播放器不卸载，挪出可视区继续出声。
+   不用 display:none，部分浏览器会因此暂停媒体；visibility 不影响播放。 */
+.live.bg-player {
+  position: fixed;
+  top: 0;
+  left: -200vw;
+  width: 100vw;
+  height: 100dvh;
+  visibility: hidden;
+  pointer-events: none;
+}

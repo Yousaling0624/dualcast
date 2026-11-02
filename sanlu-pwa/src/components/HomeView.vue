@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
+  backToPlayer,
   clearSlot,
   deleteCombo,
+  exitSession,
   isPlayable,
   resolvePreview,
   startCombo,
@@ -128,7 +130,7 @@ onBeforeUnmount(() => {
         <div class="brand-text">
           <div class="brand-line">
             <h1>叠播</h1>
-            <span class="ver">v1.8.1</span>
+            <span class="ver">v1.9.0</span>
           </div>
           <p>DualCast · 两个直播间一起看</p>
         </div>
@@ -154,7 +156,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
 
-    <main class="body scroll-y">
+    <main class="body scroll-y" :class="{ 'has-nowplaying': store.sessionActive }">
       <section class="hero">
         <div class="hero-copy">
           <span class="eyebrow"><i></i> A 解说 + B 画面</span>
@@ -354,6 +356,25 @@ onBeforeUnmount(() => {
         <span>看直播不用登录 · 发弹幕需要扫码</span>
       </footer>
     </main>
+
+    <!-- 回主页后播放不中断，这里给一条「正在播放」回到播放 / 停止 -->
+    <Transition name="fade">
+      <div v-if="store.sessionActive" class="nowplaying">
+        <span class="np-icon" :class="{ paused: !store.playing }"><i></i></span>
+        <span class="np-copy">
+          <strong>{{ store.playing ? '正在后台播放' : '播放已暂停' }}</strong>
+          <small>{{ store.b.title || store.a.title || '直播' }}</small>
+        </span>
+        <button class="np-back" @click="backToPlayer">
+          <AppIcon name="play" :size="14" />
+          回到播放
+        </button>
+        <button class="np-stop" title="停止播放并结束这次会话" @click="exitSession">
+          <AppIcon name="close" :size="13" />
+          <span>停止</span>
+        </button>
+      </div>
+    </Transition>
 
     <SettingsDrawer ref="drawer" />
   </div>
@@ -1617,5 +1638,117 @@ onBeforeUnmount(() => {
     margin-left: auto;
     margin-right: auto;
   }
+}
+
+/* ---------- 后台播放时的「正在播放」条 ---------- */
+
+.nowplaying {
+  position: fixed;
+  left: 50%;
+  bottom: calc(10px + var(--safe-bottom));
+  transform: translateX(-50%);
+  z-index: 30;
+  width: min(560px, calc(100% - 16px));
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 7px 7px 9px;
+  border-radius: 18px;
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.28);
+}
+
+.np-icon {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent-soft);
+}
+
+.np-icon i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(217, 119, 87, 0.18);
+  animation: np-pulse 1.6s ease-in-out infinite;
+}
+
+.np-icon.paused i {
+  animation: none;
+  background: var(--text-dim);
+  box-shadow: none;
+}
+
+@keyframes np-pulse {
+  50% {
+    opacity: 0.4;
+    transform: scale(0.82);
+  }
+}
+
+.np-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.np-copy strong {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--text);
+}
+
+.np-copy small {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.np-back {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 13px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.np-stop {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 7px 10px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.np-stop:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.body.has-nowplaying {
+  padding-bottom: calc(88px + var(--safe-bottom));
 }
 </style>

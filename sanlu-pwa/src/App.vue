@@ -31,6 +31,7 @@ onBeforeUnmount(() => darkQuery.removeEventListener('change', applyTheme))
 </script>
 
 <template>
-  <HomeView v-if="store.view === 'home'" />
-  <LiveView v-else />
+  <HomeView v-show="store.view === 'home'" />
+  <!-- 会话开始后 LiveView 一直挂着：回主页只是把它挪出屏幕，声音和弹幕继续走 -->
+  <LiveView v-if="store.sessionActive" :class="{ 'bg-player': store.view !== 'live' }" />
 </template>
