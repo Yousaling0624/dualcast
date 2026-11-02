@@ -26,6 +26,14 @@ export interface MiniBox {
 
 export type MiniCorner = 'tl' | 'tr' | 'bl' | 'br'
 
+/** 左上角定位的矩形，小窗「全屏」用 */
+export interface BoxRect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
 export const MINI_ASPECT = 16 / 9
 export const MINI_MIN_WIDTH = 160
 
@@ -128,6 +136,69 @@ export function proportionalResize(
     top: clamp(top, pad, Math.max(pad, bounds.height - height - pad)),
     width,
     height,
+  }
+}
+
+/**
+ * 在画面区域内放一个指定比例的盒子（小窗「全屏」用）。
+ *
+ * 盒子按 16:9 撑到最大并居中：和小窗平时比例一致，铺满时画面不会上下被裁。
+ * 四边留 margin（再加上安全区），手机边缘的返回手势不会和框选打架。
+ */
+export function fitAspectBox(
+  bounds: BoxSize,
+  aspect = MINI_ASPECT,
+  margin = 14,
+  safe: { left?: number; right?: number; top?: number; bottom?: number } = {}
+): BoxRect {
+  const padX = margin * 2 + (safe.left ?? 0) + (safe.right ?? 0)
+  const padY = margin * 2 + (safe.top ?? 0) + (safe.bottom ?? 0)
+  const availW = Math.max(40, bounds.width - padX)
+  const availH = Math.max(40 / aspect, bounds.height - padY)
+  let width = availW
+  let height = width / aspect
+  if (height > availH) {
+    height = availH
+    width = height * aspect
+  }
+  return {
+    left: (bounds.width - width) / 2,
+    top: (bounds.height - height) / 2,
+    width,
+    height,
+  }
+}
+
+/**
+ * 把当前视图（双指缩放 + 拖动）上画出的裁切框，还原成完整画面的归一化坐标。
+ *
+ * 视图变换是 translate(pan) scale(zoom)、origin 在中心，
+ * 所以屏幕坐标 q 对应的源坐标：p = (q - 0.5 - pan / 尺寸) / zoom + 0.5。
+ */
+export function cropThroughView(
+  crop: CropRect | null,
+  zoom: number,
+  panX: number,
+  panY: number,
+  width: number,
+  height: number
+): CropRect | null {
+  if (!crop) return null
+  const z = Math.max(1, zoom)
+  if (z <= 1.0001 && Math.abs(panX) < 0.5 && Math.abs(panY) < 0.5) return { ...crop }
+  const w = Math.max(1, width)
+  const h = Math.max(1, height)
+  const invX = (v: number) => (v - 0.5 - panX / w) / z + 0.5
+  const invY = (v: number) => (v - 0.5 - panY / h) / z + 0.5
+  const ax = clamp01(invX(crop.x))
+  const bx = clamp01(invX(crop.x + crop.w))
+  const ay = clamp01(invY(crop.y))
+  const by = clamp01(invY(crop.y + crop.h))
+  return {
+    x: Math.min(ax, bx),
+    y: Math.min(ay, by),
+    w: Math.max(0.01, Math.abs(bx - ax)),
+    h: Math.max(0.01, Math.abs(by - ay)),
   }
 }
 

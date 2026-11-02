@@ -26,8 +26,10 @@ import {
 import type { ChatMsg } from '../lib/danmaku'
 import type { ReportResult } from '../lib/bili'
 import {
+  cropThroughView,
   cropTransform,
   defaultMiniWidth,
+  fitAspectBox,
   isUsableCrop,
   normalizeCrop,
   proportionalResize,
@@ -68,6 +70,23 @@ const miniW = ref(300)
 const miniZoom = ref(1)
 const miniPan = ref({ x: 0, y: 0 })
 const miniH = computed(() => (miniW.value * 9) / 16)
+/** 画面区域尺寸和安全区，用来算小窗「全屏」的盒子 */
+const zoneSize = ref({ width: 0, height: 0 })
+const safeInset = ref({ left: 0, right: 0, top: 0, bottom: 0 })
+const expandedBox = computed(() =>
+  fitAspectBox(zoneSize.value, undefined, 14, safeInset.value)
+)
+const expandedStyle = computed(() => {
+  const b = expandedBox.value
+  return {
+    left: `${b.left}px`,
+    top: `${b.top}px`,
+    width: `${b.width}px`,
+    height: `${b.height}px`,
+    right: 'auto',
+    bottom: 'auto',
+  }
+})
 let miniTapTimer: number | null = null
 let miniHintTimer: number | null = null
 let miniTapCandidate = false
@@ -86,7 +105,12 @@ let dragging = false
 let dragStart = { x: 0, y: 0, px: 0, py: 0, wx: 0, wy: 0 }
 let pinchDist = 0
 let pinchZoom = 1
+let pinchMid = { x: 0, y: 0 }
+let pinchPan = { x: 0, y: 0 }
 let resizing = false
+let zoneObserver: ResizeObserver | null = null
+/** 裁切模式里的双指缩放/拖动 */
+const cropPointers = new Map<number, { x: number; y: number }>()
 let resizeStart: {
   corner: MiniCorner
   box: MiniBox
@@ -339,6 +363,7 @@ async function toggleFullscreen() {
 
 function onFsChange() {
   isFullscreen.value = !!document.fullscreenElement
+  syncZoneSize()
   if (isFullscreen.value) {
     collapsedBeforeFullscreen = chatCollapsed.value
     chatCollapsed.value = true
@@ -422,13 +447,30 @@ function toggleMini(on?: boolean) {
 function toggleMiniExpand() {
   miniExpanded.value = !miniExpanded.value
   exitMiniImmersive()
+  // 两个方向进出都回到原始视图，避免把一套坐标系的缩放/平移带进另一套
+  miniZoom.value = 1
+  miniPan.value = { x: 0, y: 0 }
   if (!miniExpanded.value) {
-    miniZoom.value = 1
-    miniPan.value = { x: 0, y: 0 }
     cropMode.value = false
     cropDraft.value = null
   }
   reveal()
+}
+
+/** 小窗当前显示区域的尺寸：平时是 16:9 小窗，「全屏」时是适配后的盒子 */
+function currentMiniSize() {
+  return miniExpanded.value ? expandedBox.value : { width: miniW.value, height: miniH.value }
+}
+
+/** 缩放后平移不能露出画面外：每个方向最多 (zoom - 1) × 尺寸 / 2 */
+function clampPan(px: number, py: number, zoom = miniZoom.value) {
+  const box = currentMiniSize()
+  const maxX = ((zoom - 1) * box.width) / 2
+  const maxY = ((zoom - 1) * box.height) / 2
+  return {
+    x: Math.max(-maxX, Math.min(maxX, px)),
+    y: Math.max(-maxY, Math.min(maxY, py)),
+  }
 }
 
 function clampMiniPos() {
@@ -444,10 +486,6 @@ function clampMiniPos() {
 function onMiniPointerDown(e: PointerEvent) {
   miniTapCandidate = !cropMode.value
   miniTapStart = { x: e.clientX, y: e.clientY }
-  if (miniExpanded.value) {
-    reveal()
-    return
-  }
   const target = e.currentTarget as HTMLElement
   target.setPointerCapture(e.pointerId)
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
@@ -455,6 +493,8 @@ function onMiniPointerDown(e: PointerEvent) {
     const [a, b] = [...pointers.values()]
     pinchDist = Math.hypot(a.x - b.x, a.y - b.y) || 1
     pinchZoom = miniZoom.value
+    pinchMid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    pinchPan = { x: miniPan.value.x, y: miniPan.value.y }
     dragging = false
     miniTapCandidate = false
   } else if (pointers.size === 1) {
@@ -468,6 +508,7 @@ function onMiniPointerDown(e: PointerEvent) {
       wy: miniPos.value.y,
     }
   }
+  if (miniExpanded.value) reveal()
 }
 
 function onMiniPointerMove(e: PointerEvent) {
@@ -479,21 +520,29 @@ function onMiniPointerMove(e: PointerEvent) {
   ) {
     miniTapCandidate = false
   }
-  if (miniExpanded.value || resizing) return
+  if (resizing) return
   if (pointers.has(e.pointerId)) pointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
   if (pointers.size === 2) {
     const [a, b] = [...pointers.values()]
     const dist = Math.hypot(a.x - b.x, a.y - b.y)
-    miniZoom.value = Math.max(1, Math.min(3, pinchZoom * (dist / pinchDist)))
+    const midX = (a.x + b.x) / 2
+    const midY = (a.y + b.y) / 2
+    const zoom = Math.max(1, Math.min(3, pinchZoom * (dist / pinchDist)))
+    miniZoom.value = zoom
+    // 双指整体移动 = 拖动画面，缩放/拖动在全屏和窗口里都能用
+    miniPan.value = clampPan(
+      pinchPan.x + midX - pinchMid.x,
+      pinchPan.y + midY - pinchMid.y,
+      zoom
+    )
     return
   }
   if (!dragging) return
-  if (miniZoom.value > 1) {
-    const max = ((miniZoom.value - 1) * miniW.value) / 2
-    miniPan.value = {
-      x: Math.max(-max, Math.min(max, dragStart.px + e.clientX - dragStart.x)),
-      y: Math.max(-max, Math.min(max, dragStart.py + e.clientY - dragStart.y)),
-    }
+  if (miniExpanded.value || miniZoom.value > 1) {
+    miniPan.value = clampPan(
+      dragStart.px + e.clientX - dragStart.x,
+      dragStart.py + e.clientY - dragStart.y
+    )
   } else {
     const zone = zoneEl.value
     if (!zone) return
@@ -519,6 +568,8 @@ function onMiniPointerUp(e: PointerEvent) {
       wx: miniPos.value.x,
       wy: miniPos.value.y,
     }
+    // 双指松开一根后，剩下那根还能接着拖
+    dragging = true
   }
   if (wasTap && pointers.size === 0) scheduleMiniTap()
   miniTapCandidate = false
@@ -526,7 +577,6 @@ function onMiniPointerUp(e: PointerEvent) {
 
 function onMiniDoubleClick() {
   clearMiniTap()
-  if (miniExpanded.value) return
   miniZoom.value = miniZoom.value > 1 ? 1 : 2
   miniPan.value = { x: 0, y: 0 }
 }
@@ -573,6 +623,9 @@ function toggleCropMode() {
   cropMode.value = !cropMode.value
   if (cropMode.value) {
     exitMiniImmersive()
+    // 从完整画面开始选；已有裁切只作为初始预览框，双指还能再缩放对准摄像头
+    miniZoom.value = 1
+    miniPan.value = { x: 0, y: 0 }
     cropDraft.value = miniCrop.value ? { ...miniCrop.value } : { x: 0, y: 0, w: 1, h: 1 }
   } else {
     cropDraft.value = null
@@ -584,6 +637,17 @@ function onCropDown(e: PointerEvent) {
   const el = e.currentTarget as HTMLElement
   const rect = el.getBoundingClientRect()
   el.setPointerCapture(e.pointerId)
+  cropPointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+  if (cropPointers.size === 2) {
+    // 两指：先缩放/拖动对准画面，抬手后再画框
+    const [a, b] = [...cropPointers.values()]
+    pinchDist = Math.hypot(a.x - b.x, a.y - b.y) || 1
+    pinchZoom = miniZoom.value
+    pinchMid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }
+    pinchPan = { x: miniPan.value.x, y: miniPan.value.y }
+    cropping = false
+    return
+  }
   cropStart = {
     x: Math.max(0, Math.min(rect.width, e.clientX - rect.left)),
     y: Math.max(0, Math.min(rect.height, e.clientY - rect.top)),
@@ -593,15 +657,38 @@ function onCropDown(e: PointerEvent) {
 }
 
 function onCropMove(e: PointerEvent) {
-  if (!cropping) return
   const el = e.currentTarget as HTMLElement
+  if (cropPointers.has(e.pointerId)) {
+    cropPointers.set(e.pointerId, { x: e.clientX, y: e.clientY })
+  }
+  if (cropPointers.size === 2) {
+    const [a, b] = [...cropPointers.values()]
+    const dist = Math.hypot(a.x - b.x, a.y - b.y)
+    const midX = (a.x + b.x) / 2
+    const midY = (a.y + b.y) / 2
+    const zoom = Math.max(1, Math.min(3, pinchZoom * (dist / pinchDist)))
+    miniZoom.value = zoom
+    miniPan.value = clampPan(
+      pinchPan.x + midX - pinchMid.x,
+      pinchPan.y + midY - pinchMid.y,
+      zoom
+    )
+    return
+  }
+  if (!cropping) return
   const rect = el.getBoundingClientRect()
   const x = Math.max(0, Math.min(rect.width, e.clientX - rect.left))
   const y = Math.max(0, Math.min(rect.height, e.clientY - rect.top))
   cropDraft.value = normalizeCrop(cropStart.x, cropStart.y, x, y, rect.width, rect.height)
 }
 
-function onCropUp() {
+function onCropUp(e: PointerEvent) {
+  cropPointers.delete(e.pointerId)
+  if (cropPointers.size > 0) {
+    // 双指变单指：不接着画框，等手指都抬起再重新框
+    cropping = false
+    return
+  }
   cropping = false
   if (!isUsableCrop(cropDraft.value)) {
     cropDraft.value = miniCrop.value ? { ...miniCrop.value } : { x: 0, y: 0, w: 1, h: 1 }
@@ -611,8 +698,20 @@ function onCropUp() {
 function applyCrop() {
   const draft = cropDraft.value
   if (isUsableCrop(draft)) {
-    const full = draft.w >= 0.999 && draft.h >= 0.999
-    miniCrop.value = full ? null : { ...draft }
+    // 框是在当前缩放/平移后的视图上画的，换回完整画面的坐标再保存
+    const box = currentMiniSize()
+    const mapped = cropThroughView(
+      draft,
+      miniZoom.value,
+      miniPan.value.x,
+      miniPan.value.y,
+      box.width,
+      box.height
+    )
+    if (mapped) {
+      const full = mapped.w >= 0.999 && mapped.h >= 0.999
+      miniCrop.value = full ? null : mapped
+    }
   }
   cropMode.value = false
   cropDraft.value = null
@@ -780,9 +879,25 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
+/** 记录画面区域尺寸/安全区，小窗「全屏」按这个算适配盒子 */
+function syncZoneSize() {
+  const zone = zoneEl.value
+  if (!zone) return
+  zoneSize.value = { width: zone.clientWidth, height: zone.clientHeight }
+  const css = getComputedStyle(zone)
+  const px = (name: string) => parseFloat(css.getPropertyValue(name)) || 0
+  safeInset.value = {
+    left: px('--safe-left'),
+    right: px('--safe-right'),
+    top: px('--safe-top'),
+    bottom: px('--safe-bottom'),
+  }
+}
+
 function onWindowResize() {
   const zone = zoneEl.value
   if (!zone) return
+  syncZoneSize()
   const max = zone.getBoundingClientRect().width - 16
   miniW.value = Math.min(miniW.value, Math.max(120, max))
   clampMiniPos()
@@ -824,7 +939,13 @@ onMounted(() => {
   window.addEventListener('keydown', onKey)
   window.addEventListener('resize', onWindowResize)
   const zone = zoneEl.value
-  if (zone) miniW.value = defaultMiniWidth(zone.clientWidth)
+  if (zone) {
+    syncZoneSize()
+    miniW.value = defaultMiniWidth(zone.clientWidth)
+    // 窗口 / 全屏 / 侧边聊天栏都会改画面区域尺寸
+    zoneObserver = new ResizeObserver(syncZoneSize)
+    zoneObserver.observe(zone)
+  }
   clampMiniPos()
   reveal()
 })
@@ -833,6 +954,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('fullscreenchange', onFsChange)
   window.removeEventListener('keydown', onKey)
   window.removeEventListener('resize', onWindowResize)
+  zoneObserver?.disconnect()
+  zoneObserver = null
   if (hideTimer) clearTimeout(hideTimer)
   clearMiniTap()
   exitMiniImmersive()
@@ -994,7 +1117,7 @@ onBeforeUnmount(() => {
         }"
         :style="
           miniExpanded
-            ? undefined
+            ? expandedStyle
             : { right: miniPos.x + 'px', top: miniPos.y + 'px', width: miniW + 'px', height: miniH + 'px' }
         "
         @pointerdown="onMiniPointerDown"
@@ -1003,7 +1126,8 @@ onBeforeUnmount(() => {
         @pointercancel="onMiniPointerUp"
         @dblclick="onMiniDoubleClick"
       >
-        <div class="mini-frame" :style="miniCropStyle ? { transform: miniCropStyle } : undefined">
+        <!-- 框选时先看完整画面，应用裁切后再套变换，方便重新框 -->
+        <div class="mini-frame" :style="miniCropStyle && !cropMode ? { transform: miniCropStyle } : undefined">
           <video
             ref="videoAEl"
             playsinline
@@ -1031,7 +1155,7 @@ onBeforeUnmount(() => {
               height: cropDraft.h * 100 + '%',
             }"
           ></div>
-          <span class="crop-tip">拖动框选要放大的画面区域</span>
+          <span class="crop-tip">双指缩放对准，拖动框选画面区域</span>
         </div>
 
         <Transition name="fade">
@@ -1697,14 +1821,9 @@ onBeforeUnmount(() => {
   transition: transform 0.08s linear;
 }
 
-/* 小窗「全屏」是铺满画面区域；手机边缘有返回手势，留一圈空隙更好框选裁切 */
+/* 小窗「全屏」：JS 按画面区域算好盒子（四边留 14px + 安全区），
+   比例和小窗一致，画面不会被裁掉，手机边缘手势也不挡框选 */
 .mini.expanded {
-  top: 14px;
-  bottom: 14px;
-  left: calc(14px + var(--safe-left));
-  right: calc(14px + var(--safe-right));
-  width: auto !important;
-  height: auto !important;
   border-radius: 16px;
   border: 1px solid rgba(255, 255, 255, 0.24);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
@@ -1712,7 +1831,9 @@ onBeforeUnmount(() => {
   z-index: 11;
 }
 
+/* 实际画面比例和盒子不一致时用 contain 兜底，保证完整显示不裁切 */
 .mini.expanded video {
+  object-fit: contain;
   transition: none;
 }
 

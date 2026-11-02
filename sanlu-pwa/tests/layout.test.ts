@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import {
   MINI_ASPECT,
   MINI_MIN_WIDTH,
+  cropThroughView,
   cropTransform,
   defaultMiniWidth,
+  fitAspectBox,
   isUsableCrop,
   normalizeCrop,
   proportionalResize,
@@ -75,6 +77,80 @@ describe('cropTransform', () => {
     expect(cropTransform({ x: 0.25, y: 0.25, w: 0.5, h: 0.5 })).toBe(
       'scale(2.0000) translate(-25.0000%, -25.0000%)'
     )
+  })
+})
+
+describe('fitAspectBox', () => {
+  it('高度受限时按高度撑满，左右居中留边', () => {
+    const b = fitAspectBox({ width: 390, height: 219 }, MINI_ASPECT, 14)
+    expect(b.height).toBeCloseTo(191, 5)
+    expect(b.width).toBeCloseTo(191 * MINI_ASPECT, 5)
+    expect(b.top).toBeCloseTo(14, 5)
+    expect(b.left).toBeCloseTo((390 - 191 * MINI_ASPECT) / 2, 5)
+  })
+
+  it('宽度受限时按宽度撑满，上下居中留边', () => {
+    const b = fitAspectBox({ width: 800, height: 500 }, MINI_ASPECT, 14)
+    expect(b.width).toBeCloseTo(772, 5)
+    expect(b.height).toBeCloseTo(772 / MINI_ASPECT, 5)
+    expect(b.left).toBeCloseTo(14, 5)
+    expect(b.top).toBeCloseTo((500 - 772 / MINI_ASPECT) / 2, 5)
+  })
+
+  it('安全区会额外压缩可用空间，盒子始终不侵入安全区', () => {
+    const safe = { left: 20, right: 20 }
+    const b = fitAspectBox({ width: 390, height: 219 }, MINI_ASPECT, 14, safe)
+    expect(b.left).toBeGreaterThanOrEqual(14 + safe.left - 0.001)
+    expect(b.left + b.width).toBeLessThanOrEqual(390 - 14 - safe.right + 0.001)
+  })
+
+  it('盒子始终维持目标比例', () => {
+    for (const bounds of [
+      { width: 390, height: 219 },
+      { width: 844, height: 390 },
+      { width: 1366, height: 768 },
+      { width: 200, height: 600 },
+    ]) {
+      const b = fitAspectBox(bounds, MINI_ASPECT, 14)
+      expect(b.width / b.height).toBeCloseTo(MINI_ASPECT, 5)
+      expect(b.width).toBeGreaterThan(0)
+      expect(b.height).toBeGreaterThan(0)
+    }
+  })
+})
+
+describe('cropThroughView', () => {
+  it('原始视图下保持裁切框不变', () => {
+    const crop = { x: 0.25, y: 0.25, w: 0.5, h: 0.5 }
+    expect(cropThroughView(crop, 1, 0, 0, 360, 180)).toEqual(crop)
+  })
+
+  it('2 倍放大后把屏幕上的框还原成完整画面里的区域', () => {
+    const crop = cropThroughView({ x: 0.25, y: 0.25, w: 0.5, h: 0.5 }, 2, 0, 0, 360, 180)
+    expect(crop!.x).toBeCloseTo(0.375, 5)
+    expect(crop!.y).toBeCloseTo(0.375, 5)
+    expect(crop!.w).toBeCloseTo(0.25, 5)
+    expect(crop!.h).toBeCloseTo(0.25, 5)
+  })
+
+  it('平移也会一起反向抵消', () => {
+    const crop = cropThroughView({ x: 0.25, y: 0.25, w: 0.5, h: 0.5 }, 1, 36, 18, 360, 180)
+    expect(crop!.x).toBeCloseTo(0.15, 5)
+    expect(crop!.y).toBeCloseTo(0.15, 5)
+    expect(crop!.w).toBeCloseTo(0.5, 5)
+    expect(crop!.h).toBeCloseTo(0.5, 5)
+  })
+
+  it('还原结果夹在 0~1 内', () => {
+    const crop = cropThroughView({ x: 0, y: 0, w: 0.5, h: 0.5 }, 3, 0, 0, 360, 180)
+    expect(crop!.x).toBeGreaterThanOrEqual(0)
+    expect(crop!.y).toBeGreaterThanOrEqual(0)
+    expect(crop!.x + crop!.w).toBeLessThanOrEqual(1)
+    expect(crop!.y + crop!.h).toBeLessThanOrEqual(1)
+  })
+
+  it('没有裁切框时返回 null', () => {
+    expect(cropThroughView(null, 2, 0, 0, 360, 180)).toBeNull()
   })
 })
 
