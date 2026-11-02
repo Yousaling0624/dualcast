@@ -1,0 +1,22 @@
+# Node
+node_modules/
+dist/
+.wrangler/
+.pnpm-store/
+
+# Android
+build/
+.gradle/
+.idea/
+.cxx/
+captures/
+local.properties
+*.apk
+*.aab
+*.iml
+
+# 其他
+.DS_Store
+*.local
+.env
+.env.*

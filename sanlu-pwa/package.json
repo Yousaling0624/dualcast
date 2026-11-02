@@ -1,0 +1,27 @@
+{
+  "name": "sanlu-dualcast",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "vite build && wrangler pages deploy dist --project-name sanlu"
+  },
+  "dependencies": {
+    "brotli-wasm": "^3.0.1",
+    "hls.js": "^1.5.20",
+    "mpegts.js": "^1.8.0",
+    "qrcode": "^1.5.4",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261101.1",
+    "@types/qrcode": "^1.5.5",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.7",
+    "wrangler": "^4.1.0"
+  }
+}
