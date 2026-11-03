@@ -1635,13 +1635,13 @@ onBeforeUnmount(() => {
   background: #000;
 }
 
-/* 全屏时底栏收成右侧的一条，左侧和中间留给画面 */
+/* 全屏时底栏也居中，和平时保持一致 */
 .video-zone:fullscreen .bottombar {
-  left: auto;
-  right: calc(14px + var(--safe-right));
+  left: 50%;
+  right: auto;
   width: max-content;
   max-width: calc(100% - 28px);
-  transform: none;
+  transform: translateX(-50%);
 }
 
 /* 全屏底栏更高，提示条跟着抬高，别压到按钮上 */
