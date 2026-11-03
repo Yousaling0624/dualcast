@@ -13,7 +13,6 @@ import {
   plusOne,
   reconnect,
   removeSource,
-  reportMessage,
   replyInputLimit,
   resumePlayback,
   retryDanmaku,
@@ -28,7 +27,6 @@ import {
   viewerLabel,
 } from '../lib/store'
 import type { ChatMsg } from '../lib/danmaku'
-import type { ReportResult } from '../lib/bili'
 import type { ExtraRoom } from '../lib/store'
 import { badgePreviewText } from '../lib/sources'
 import {
@@ -59,6 +57,8 @@ const drawer = ref<InstanceType<typeof SettingsDrawer> | null>(null)
 const quickInput = ref<HTMLInputElement | null>(null)
 
 const controls = ref(true)
+/** 底栏弹幕输入框是否聚焦：聚焦时不让控件自动隐藏 */
+const dockFocused = ref(false)
 let hideTimer: number | null = null
 const qualityOpen = ref(false)
 const chatCollapsed = ref(false)
@@ -142,27 +142,13 @@ interface QuickAnchor {
   maxHeight: number
 }
 
-/* 点 / 悬停画面上的弹幕，浮出 +1 / 回复 / 举报 */
+/* 点 / 悬停画面上的弹幕，浮出 +1 / 回复 */
 const quickTarget = ref<ChatMsg | null>(null)
 const quickAnchor = ref<QuickAnchor | null>(null)
 const quickMode = ref<'click' | 'hover'>('click')
 const quickReply = ref(false)
 const quickText = ref('')
 const quickHint = ref('')
-const quickReport = ref(false)
-const quickReporting = ref(false)
-const quickReportReason = ref(6)
-const quickReportHint = ref('')
-const quickReportDone = ref(false)
-
-const REPORT_REASONS = [
-  { value: 2, label: '色情低俗' },
-  { value: 4, label: '人身攻击' },
-  { value: 6, label: '垃圾广告' },
-  { value: 7, label: '引战' },
-  { value: 9, label: '恶意刷屏' },
-  { value: 11, label: '其他' },
-]
 
 const hoverCapable =
   typeof window !== 'undefined' && window.matchMedia('(hover: hover) and (pointer: fine)').matches
@@ -208,18 +194,41 @@ const firstError = computed(
     (store.settings.danmaku.includeB ? store.bDanmakuError : '')
 )
 
-function reveal() {
-  controls.value = true
-  exitMiniImmersive()
+function armHideTimer() {
   if (hideTimer) clearTimeout(hideTimer)
   hideTimer = window.setTimeout(() => {
-    // 快捷回复 / 多路面板 / 更多菜单还开着时不自动收，避免打字打一半控件消失
-    if (quickTarget.value || multiOpen.value || moreOpen.value) return
+    // 快捷回复 / 多路面板 / 更多菜单还开着，或正在底栏输入弹幕时不自动收，
+    // 避免打字打一半输入框跟着控件一起消失
+    if (quickTarget.value || multiOpen.value || moreOpen.value || dockFocused.value) return
     hideControls()
   }, 4600)
 }
 
+function reveal() {
+  controls.value = true
+  exitMiniImmersive()
+  armHideTimer()
+}
+
+/** 底栏输入框聚焦期间锁住控件，键盘弹起 / 慢慢打字都不会把输入框收走 */
+function onDockFocus() {
+  dockFocused.value = true
+  dockHint.value = ''
+  if (hideTimer) {
+    clearTimeout(hideTimer)
+    hideTimer = null
+  }
+}
+
+function onDockBlur() {
+  dockFocused.value = false
+  // 发送后输入框失焦，重新给控件计时；面板 / 快捷条开着时由定时器自己跳过
+  if (controls.value) armHideTimer()
+}
+
 function hideControls() {
+  // 输入框聚焦时一律不自动收控件，否则正在打的弹幕会跟着输入框一起消失
+  if (dockFocused.value) return
   controls.value = false
   qualityOpen.value = false
   multiOpen.value = false
@@ -241,6 +250,11 @@ function onZoneTap(e: PointerEvent) {
     )
   )
     return
+  // 正在输入弹幕时点画面：先收起键盘，不立刻把输入框和控件一起收掉
+  if (dockFocused.value) {
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    return
+  }
   if (quickTarget.value) {
     closeQuick()
     return
@@ -755,10 +769,6 @@ function openQuick(hit: DmHit, mode: 'click' | 'hover') {
   quickReply.value = false
   quickText.value = ''
   quickHint.value = ''
-  quickReport.value = false
-  quickReporting.value = false
-  quickReportHint.value = ''
-  quickReportDone.value = false
   clearSendError()
 
   const zone = zoneEl.value
@@ -789,46 +799,11 @@ function closeQuick() {
   quickTarget.value = null
   quickAnchor.value = null
   quickReply.value = false
-  quickReport.value = false
-  quickReporting.value = false
-  quickReportHint.value = ''
-  quickReportDone.value = false
   quickText.value = ''
   quickHint.value = ''
   cancelHoverClose()
   clearHoverOpen()
   reveal()
-}
-
-function startQuickReport() {
-  if (!quickTarget.value) return
-  if (!store.loggedIn) {
-    quickHint.value = '先登录 B 站账号才能举报'
-    return
-  }
-  quickReport.value = true
-  quickReportHint.value = ''
-}
-
-async function submitQuickReport() {
-  if (!quickTarget.value || quickReporting.value) return
-  quickReporting.value = true
-  quickReportHint.value = ''
-  try {
-    const result: ReportResult = await reportMessage(quickTarget.value, quickReportReason.value)
-    quickReportDone.value = result.ok
-    quickReportHint.value = result.unsupported
-      ? `${result.message}。也可以打开原直播间后长按弹幕举报。`
-      : result.message
-  } finally {
-    quickReporting.value = false
-  }
-}
-
-function openSourceRoom() {
-  const roomId = quickTarget.value?.sourceRoomId
-  if (!roomId) return
-  window.open(`https://live.bilibili.com/${roomId}`, '_blank', 'noopener,noreferrer')
 }
 
 function doQuickPlusOne() {
@@ -1262,7 +1237,8 @@ onBeforeUnmount(() => {
               :placeholder="store.loggedIn ? '发个弹幕…' : '登录后发弹幕'"
               enterkeyhint="send"
               aria-label="发弹幕"
-              @focus="dockHint = ''"
+              @focus="onDockFocus"
+              @blur="onDockBlur"
               @keydown.enter="(e) => !e.isComposing && dockSend()"
             />
             <button
@@ -1537,7 +1513,7 @@ onBeforeUnmount(() => {
         </div>
         <p class="quick-text">{{ quickTarget.text }}</p>
 
-        <template v-if="!quickReply && !quickReport">
+        <template v-if="!quickReply">
           <p v-if="quickHint" class="quick-hint">{{ quickHint }}</p>
           <p v-else-if="store.sendState.error" class="quick-hint">{{ store.sendState.error }}</p>
           <div class="quick-actions">
@@ -1550,17 +1526,13 @@ onBeforeUnmount(() => {
                 <AppIcon name="reply" :size="15" />
                 回复
               </button>
-              <button v-if="canInteract(quickTarget)" class="qbtn" @click="startQuickReport">
-                <AppIcon name="flag" :size="15" />
-                举报
-              </button>
             </template>
             <button v-else class="qbtn plus" @click="openSettings('account')">去登录</button>
             <button class="qbtn dim" @click="closeQuick">关闭</button>
           </div>
         </template>
 
-        <template v-else-if="quickReply">
+        <template v-else>
           <div class="quick-input-row">
             <input
               ref="quickInput"
@@ -1589,39 +1561,6 @@ onBeforeUnmount(() => {
               @click="doQuickSend"
             >
               {{ store.sendState.sending ? '发送中…' : '发送' }}
-            </button>
-          </div>
-        </template>
-
-        <template v-else>
-          <div class="report-head">
-            <AppIcon name="flag" :size="14" />
-            举报这条弹幕
-          </div>
-          <div class="report-reasons">
-            <button
-              v-for="r in REPORT_REASONS"
-              :key="r.value"
-              class="report-chip"
-              :class="{ on: quickReportReason === r.value }"
-              @click="quickReportReason = r.value"
-            >
-              {{ r.label }}
-            </button>
-          </div>
-          <p v-if="quickReportHint" class="quick-hint">{{ quickReportHint }}</p>
-          <p v-else class="quick-note">
-            提交到 {{ quickTarget.sourceName || '原直播间' }}，由 B 站审核。
-          </p>
-          <div class="quick-actions">
-            <button class="qbtn dim" @click="quickReport = false; quickReportHint = ''">返回</button>
-            <button class="qbtn" @click="openSourceRoom">打开直播间</button>
-            <button
-              class="qbtn plus"
-              :disabled="quickReporting || quickReportDone"
-              @click="submitQuickReport"
-            >
-              {{ quickReportDone ? '已提交' : quickReporting ? '提交中…' : '提交举报' }}
             </button>
           </div>
         </template>
@@ -1696,12 +1635,13 @@ onBeforeUnmount(() => {
   background: #000;
 }
 
-/* 全屏时底栏不再铺满整行，收成居中的一条，中间留给弹幕输入框 */
+/* 全屏时底栏收成右侧的一条，左侧和中间留给画面 */
 .video-zone:fullscreen .bottombar {
-  left: 50%;
-  right: auto;
-  width: min(760px, calc(100% - 24px));
-  transform: translateX(-50%);
+  left: auto;
+  right: calc(14px + var(--safe-right));
+  width: max-content;
+  max-width: calc(100% - 28px);
+  transform: none;
 }
 
 /* 全屏底栏更高，提示条跟着抬高，别压到按钮上 */
@@ -2025,13 +1965,14 @@ onBeforeUnmount(() => {
   flex: 1 1 180px;
   min-width: 0;
   max-width: 360px;
-  height: 38px;
+  /* 和两侧按钮同高、同圆角，底栏看起来才是一条线 */
+  height: 46px;
   align-self: center;
   display: flex;
   align-items: center;
   gap: 4px;
   padding: 0 4px 0 12px;
-  border-radius: 999px;
+  border-radius: 14px;
   background: rgba(255, 255, 255, 0.09);
   border: 1px solid rgba(255, 255, 255, 0.14);
   transition:
@@ -2942,45 +2883,6 @@ onBeforeUnmount(() => {
   color: var(--danger);
 }
 
-.quick-note {
-  margin: 0;
-  font-size: 10.5px;
-  line-height: 1.5;
-  color: var(--text-faint);
-}
-
-.report-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 650;
-  color: var(--text);
-}
-
-.report-reasons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.report-chip {
-  border: 1px solid var(--line);
-  background: var(--bg-soft);
-  color: var(--text-dim);
-  border-radius: 999px;
-  padding: 5px 11px;
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.report-chip.on {
-  background: var(--accent-soft);
-  border-color: rgba(217, 119, 87, 0.35);
-  color: var(--accent-strong);
-  font-weight: 650;
-}
-
 .quick-actions {
   display: flex;
   align-items: center;
@@ -3168,9 +3070,9 @@ onBeforeUnmount(() => {
   }
 
   .bottombar {
-    left: auto;
-    right: 14px;
-    transform: none;
+    left: 50%;
+    right: auto;
+    transform: translateX(-50%);
     width: max-content;
     max-width: calc(100% - 28px);
     bottom: 14px;
@@ -3276,7 +3178,8 @@ onBeforeUnmount(() => {
 
   .dock-compose {
     flex: 1 1 auto;
-    height: 36px;
+    height: 44px;
+    border-radius: 12px;
     padding-left: 10px;
   }
 

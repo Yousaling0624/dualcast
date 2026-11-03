@@ -50,8 +50,9 @@ function trimToMax() {
 }
 
 function add(msg: ChatMsg) {
-  const fallback = Math.max(4, Number(store.settings.sc.duration) || 8) * 1000
-  const duration = Math.min(60000, Math.max(4000, Number(msg.scDuration) || fallback))
+  // 停留时长以设置里填的为准，不再被 B 站下发的官方时长覆盖
+  const seconds = Math.min(60, Math.max(4, Number(store.settings.sc.duration) || 8))
+  const duration = seconds * 1000
   const item: ActiveSc = { key: msg.seq, msg, duration }
   active.value = [item, ...active.value]
   trimToMax()
@@ -149,6 +150,14 @@ onBeforeUnmount(clearAll)
               ¥{{ item.msg.price }}
             </span>
             <span class="sc-tag">SC</span>
+            <button
+              class="sc-close"
+              title="关闭这条 SC"
+              aria-label="关闭这条 SC"
+              @click.stop="remove(item.key)"
+            >
+              ×
+            </button>
           </div>
           <p class="sc-text">{{ item.msg.text }}</p>
         </div>
@@ -311,6 +320,29 @@ onBeforeUnmount(clearAll)
 .tier-legend .sc-tag {
   background: rgba(255, 255, 255, 0.35);
   color: inherit;
+}
+
+/* 悬浮窗整体不拦点击，只有这个关闭按钮可点 */
+.sc-close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-right: -2px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.12);
+  color: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.sc-close:hover {
+  background: rgba(0, 0, 0, 0.22);
 }
 
 .sc-text {

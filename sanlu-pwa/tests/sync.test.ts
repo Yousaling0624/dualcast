@@ -8,10 +8,16 @@ import {
   nextPauseDeadline,
   offsetAction,
   offsetsForSession,
+  pauseRemainingFor,
   remainingPauseMs,
 } from '../src/lib/sync'
 
 describe('clampOffset', () => {
+  it('偏移上限是 ±20 秒', () => {
+    expect(MAX_OFFSET_MS).toBe(20_000)
+    expect(MIN_OFFSET_MS).toBe(-20_000)
+  })
+
   it('把越界值夹到允许范围', () => {
     expect(clampOffset(MAX_OFFSET_MS + 1)).toBe(MAX_OFFSET_MS)
     expect(clampOffset(MIN_OFFSET_MS - 1)).toBe(MIN_OFFSET_MS)
@@ -90,5 +96,21 @@ describe('pause deadline', () => {
   it('剩余时长不会为负', () => {
     expect(remainingPauseMs(1000, 1300)).toBe(300)
     expect(remainingPauseMs(2000, 1300)).toBe(0)
+  })
+})
+
+describe('pauseRemainingFor', () => {
+  it('按已暂停时长抵扣目标延迟', () => {
+    expect(pauseRemainingFor(5000, 500, 2000)).toBe(2500)
+  })
+
+  it('目标已经攒够时返回 0，可以提前恢复', () => {
+    expect(pauseRemainingFor(1000, 500, 800)).toBe(0)
+    expect(pauseRemainingFor(0, 0, 100)).toBe(0)
+  })
+
+  it('非法输入不会产生 NaN', () => {
+    expect(pauseRemainingFor(Number.NaN, 500, 100)).toBe(0)
+    expect(pauseRemainingFor(1000, Number.NaN, Number.NaN)).toBe(1000)
   })
 })

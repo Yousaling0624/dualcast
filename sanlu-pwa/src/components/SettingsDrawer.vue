@@ -593,7 +593,16 @@ defineOptions({ name: 'SettingsDrawer' })
                 </div>
 
                 <div class="row col">
-                  <span class="row-text"><strong>屏蔽词</strong><small>逗号或空格分隔</small></span>
+                  <div class="range-label">
+                    <span class="row-text"><strong>屏蔽词</strong><small>逗号或空格分隔；留空则不过滤</small></span>
+                    <button
+                      v-if="store.settings.danmaku.blocked.length"
+                      class="text-btn"
+                      @click="blockedText = ''"
+                    >
+                      清空（{{ store.settings.danmaku.blocked.length }}）
+                    </button>
+                  </div>
                   <textarea v-model="blockedText" class="field" rows="2" placeholder="比如：抽奖, 活动, 关注"></textarea>
                 </div>
               </div>
@@ -624,7 +633,7 @@ defineOptions({ name: 'SettingsDrawer' })
 
                 <div class="row col">
                   <div class="range-label">
-                    <span class="row-text"><strong>停留时长</strong><small>服务端时长更长时以服务端为准</small></span>
+                    <span class="row-text"><strong>停留时长</strong><small>到时间自动收起，可在卡片上点 × 提前关闭</small></span>
                     <em>{{ store.settings.sc.duration }}s</em>
                   </div>
                   <input
@@ -899,15 +908,15 @@ defineOptions({ name: 'SettingsDrawer' })
                     v-model.number="offsetValue"
                     class="offset-range"
                     type="range"
-                    min="-5000"
-                    max="5000"
+                    min="-20000"
+                    max="20000"
                     step="50"
-                    :style="{ '--fill': ((store.sessionOffset + 5000) / 10000) * 100 + '%' }"
+                    :style="{ '--fill': ((store.sessionOffset + 20000) / 40000) * 100 + '%' }"
                   />
                   <div class="offset-scale">
-                    <span>-5s</span>
+                    <span>-20s</span>
                     <span>0</span>
-                    <span>+5s</span>
+                    <span>+20s</span>
                   </div>
                   <div class="nudge-row">
                     <button class="chip" @click="nudgeOffset(-500)">-0.5s</button>

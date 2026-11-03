@@ -11,8 +11,9 @@
 /** 常规播放时保持在直播边缘之后约 1.2 秒，给抖动留余量 */
 export const LIVE_EDGE_LATENCY = 1.2
 
-export const MAX_OFFSET_MS = 5000
-export const MIN_OFFSET_MS = -5000
+/** 手动音画偏移上限 ±20 秒 */
+export const MAX_OFFSET_MS = 20_000
+export const MIN_OFFSET_MS = -20_000
 
 /** 小于这个值的偏差交给 playbackRate 慢慢追，避免频繁暂停/跳转 */
 export const OFFSET_ACTION_THRESHOLD_MS = 350
@@ -86,4 +87,21 @@ export function nextPauseDeadline(now: number, currentDeadline: number, addMs: n
 
 export function remainingPauseMs(now: number, deadline: number): number {
   return Math.max(0, deadline - now)
+}
+
+/**
+ * 暂停补延迟的过程中用户把目标调小了：按「暂停开始时已经落后的量 + 暂停时长」
+ * 估算现在攒到多少延迟，返回还需要继续暂停多久。
+ *
+ * 直播缓冲在暂停期间按实时速度增长，所以已经攒到的延迟 ≈ 起始延迟 + 已暂停时长。
+ * 返回 0 表示目标已经达到（甚至超前），可以提前结束暂停去 seek。
+ */
+export function pauseRemainingFor(
+  desiredMs: number,
+  latencyAtPauseStartMs: number,
+  elapsedMs: number
+): number {
+  const start = Math.max(0, Number.isFinite(latencyAtPauseStartMs) ? latencyAtPauseStartMs : 0)
+  const elapsed = Math.max(0, Number.isFinite(elapsedMs) ? elapsedMs : 0)
+  return Math.max(0, clampOffset(desiredMs) - (start + elapsed))
 }

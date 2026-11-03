@@ -206,8 +206,10 @@ function spawn() {
         }
         // 冻结的弹幕停在原地，这条轨道不能再放新弹幕
         if (last.frozen) continue
-        const elapsed = (now - last.born) / 1000
-        if (last.x + last.w + 24 < width - elapsed * speed) {
+        // last.x 已经在每帧里随速度左移，这里只需判断上一条的尾巴是否已让出
+        // 屏幕右侧的出生位置；再减一次 elapsed * speed 会把移动量算两遍，
+        // 导致一条轨道很久都腾不出来，弹幕看起来又稀又重叠。
+        if (last.x + last.w + 24 < width) {
           lane = l
           found = true
           break

@@ -22,10 +22,8 @@ import {
   formatCount,
   initRoom,
   qnLabel,
-  reportDanmaku,
   sendDanmaku,
   type BiliAccount,
-  type ReportResult,
   type RoomInfo,
   type RoomPlay,
 } from './bili'
@@ -440,6 +438,8 @@ let playerA: StreamPlayer | null = null
 let playerB: StreamPlayer | null = null
 let videoAEl: HTMLVideoElement | null = null
 let videoBEl: HTMLVideoElement | null = null
+/** A / B 各自是否卡在缓冲；一路卡住时把另一路也暂停等它 */
+const peerStalled = { a: false, b: false }
 
 /** 导入房间各自的弹幕连接 */
 const extraClients = new Map<string, DanmakuClient>()
@@ -640,10 +640,18 @@ export function bindVideos(a: HTMLVideoElement, b: HTMLVideoElement) {
 }
 
 function destroyPlayers() {
+  peerStalled.a = false
+  peerStalled.b = false
   playerA?.destroy()
   playerB?.destroy()
   playerA = null
   playerB = null
+}
+
+/** 一路卡缓冲时暂停另一路；两边都在卡就各等各的，避免互相拖死 */
+function updatePeerHolds() {
+  playerA?.holdByPeer(peerStalled.b && !peerStalled.a)
+  playerB?.holdByPeer(peerStalled.a && !peerStalled.b)
 }
 
 function attachPlayer(slot: 'a' | 'b', streams: StreamSet) {
@@ -654,6 +662,7 @@ function attachPlayer(slot: 'a' | 'b', streams: StreamSet) {
     return
   }
   const s = slot === 'a' ? store.a : store.b
+  peerStalled[slot] = false
   const p = new StreamPlayer(
     video,
     streams,
@@ -663,6 +672,10 @@ function attachPlayer(slot: 'a' | 'b', streams: StreamSet) {
     },
     () => {
       s.blocked = true
+    },
+    (stalled) => {
+      peerStalled[slot] = stalled
+      updatePeerHolds()
     }
   )
   p.setVolume(store.sessionVolumes[slot])
@@ -672,6 +685,7 @@ function attachPlayer(slot: 'a' | 'b', streams: StreamSet) {
   if (!store.playing) p.pause()
   if (slot === 'a') playerA = p
   else playerB = p
+  updatePeerHolds()
 }
 
 function setSlotError(slot: 'a' | 'b', msg: string) {
@@ -838,7 +852,7 @@ function applyRoomProfile() {
   if (p) {
     store.sessionVolumes.a = Number(p.aVolume)
     store.sessionVolumes.b = Number(p.bVolume)
-    store.sessionOffset = Number(p.offsetMs || 0)
+    store.sessionOffset = clampOffset(Number(p.offsetMs || 0))
   } else {
     store.sessionVolumes.a = store.settings.volume.a
     store.sessionVolumes.b = store.settings.volume.b
@@ -1618,13 +1632,6 @@ export function roomIdForSource(sourceId?: string): number {
   if (sourceId === 'b') return store.b.roomId
   // 来源被移除后返回 0，调用方应提示用户，而不是误发到主房间
   return store.sources.find((s) => s.id === sourceId)?.roomId || 0
-}
-
-export async function reportMessage(target: ChatMsg, reason: number): Promise<ReportResult> {
-  if (!target.dmid) return { ok: false, message: '这条弹幕缺少可举报的编号' }
-  const roomId = target.sourceRoomId || roomIdForSource(target.sourceId)
-  if (!roomId) return { ok: false, message: '找不到来源直播间' }
-  return reportDanmaku(roomId, target.dmid, reason)
 }
 
 /* ---------- 发弹幕 ---------- */

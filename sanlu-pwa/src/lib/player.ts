@@ -17,6 +17,7 @@ import {
   measuredLatencyMs,
   nextPauseDeadline,
   offsetAction,
+  pauseRemainingFor,
   remainingPauseMs,
 } from './sync'
 
@@ -47,6 +48,8 @@ export class StreamPlayer {
   private urls: StreamSet
   private onState: (s: PlayState, msg?: string) => void
   private onBlocked: () => void
+  /** 这一路卡缓冲 / 恢复时通知上层，用来让另一路一起暂停等待 */
+  private onStall: (stalled: boolean) => void
   private engine: mpegts.Player | Hls | null = null
   private mode: 'mpegts' | 'hls' | 'native' | null = null
   private candidates: { mode: 'mpegts' | 'hls' | 'native'; url: string }[] = []
@@ -63,18 +66,30 @@ export class StreamPlayer {
   private syncPaused = false
   private syncTimer: number | null = null
   private pauseDeadline = 0
+  /** 这次暂停开始时的实测延迟和开始时刻，调小目标时用来重算还要停多久 */
+  private pauseStartLatency = 0
+  private pauseStartedAt = 0
+  /** 另一路卡缓冲时由 store 触发的等待暂停 */
+  private peerHold = false
+  /** 本路已经卡缓冲（去抖后） */
+  private stalled = false
+  private stallTimer: number | null = null
 
   constructor(
     video: HTMLVideoElement,
     urls: StreamSet,
     onState: (s: PlayState, msg?: string) => void,
-    onBlocked: () => void = () => {}
+    onBlocked: () => void = () => {},
+    onStall: (stalled: boolean) => void = () => {}
   ) {
     this.video = video
     this.urls = urls
     this.onState = onState
     this.onBlocked = onBlocked
+    this.onStall = onStall
     this.video.addEventListener('playing', this.onPlaying)
+    this.video.addEventListener('waiting', this.onWaiting)
+    this.video.addEventListener('pause', this.onNativePause)
     this.buildCandidates()
   }
 
@@ -87,8 +102,66 @@ export class StreamPlayer {
 
   private onPlaying = () => {
     if (this.state === 'stopped') return
+    this.clearStallTimer()
+    this.setStalled(false)
     this.setState('playing')
     this.syncNow(true)
+  }
+
+  /**
+   * 卡缓冲：先观察 400ms，真卡住了才通知 store 暂停另一路。
+   * 网络抖一下就来回暂停会让两路都一顿一顿的。
+   */
+  private onWaiting = () => {
+    if (this.state === 'stopped' || this.userPaused || this.syncPaused || this.peerHold) return
+    if (this.stallTimer) return
+    this.stallTimer = window.setTimeout(() => {
+      this.stallTimer = null
+      if (this.state === 'stopped' || this.userPaused || this.video.paused) return
+      if (this.video.readyState >= 3) return
+      this.setStalled(true)
+    }, 400)
+  }
+
+  /** 自己（而不是同步补偿）暂停时，卡缓冲状态结束，别一直拖着另一路 */
+  private onNativePause = () => {
+    this.clearStallTimer()
+    this.setStalled(false)
+  }
+
+  private clearStallTimer() {
+    if (this.stallTimer) {
+      clearTimeout(this.stallTimer)
+      this.stallTimer = null
+    }
+  }
+
+  private setStalled(v: boolean) {
+    if (this.stalled === v) return
+    this.stalled = v
+    this.onStall(v)
+  }
+
+  /**
+   * 另一路卡住时把这一路也暂停，两边一起等；对方恢复后再一起继续。
+   * 暂停期间两路都落在直播后面同样多，相对延迟保持不变。
+   */
+  holdByPeer(on: boolean) {
+    if (on === this.peerHold) return
+    this.peerHold = on
+    if (on) {
+      this.clearStallTimer()
+      if (!this.userPaused && !this.syncPaused && !this.video.paused) this.video.pause()
+      return
+    }
+    if (this.state === 'stopped' || this.userPaused || this.syncPaused) return
+    const p = this.video.play()
+    if (p && typeof p.catch === 'function') {
+      p.catch((e: unknown) => {
+        if ((e as DOMException)?.name === 'NotAllowedError') this.onBlocked()
+      })
+    }
+    window.setTimeout(() => this.syncNow(true), 200)
   }
 
   private buildCandidates() {
@@ -117,6 +190,7 @@ export class StreamPlayer {
     }
     this.userPaused = false
     this.cancelSyncPause()
+    this.resetStallState()
     this.idx = 0
     this.playCurrent()
   }
@@ -124,13 +198,25 @@ export class StreamPlayer {
   restart() {
     this.userPaused = false
     this.cancelSyncPause()
+    this.resetStallState()
     this.destroyEngine()
     this.idx = 0
     this.playCurrent()
   }
 
+  private resetStallState() {
+    this.clearStallTimer()
+    this.peerHold = false
+    this.setStalled(false)
+  }
+
   private setState(s: PlayState, msg?: string) {
     this.state = s
+    // 换线 / 报错 / 停止时不再算「卡缓冲」，否则会一直拖着另一路
+    if (s !== 'playing') {
+      this.clearStallTimer()
+      this.setStalled(false)
+    }
     this.onState(s, msg)
   }
 
@@ -177,7 +263,8 @@ export class StreamPlayer {
       const hls = new Hls({
         liveDurationInfinity: true,
         lowLatencyMode: false,
-        maxBufferLength: 12,
+        // 手动偏移最大 20 秒：暂停补延迟时缓冲要能提前攒够这么长
+        maxBufferLength: 30,
         manifestLoadingTimeOut: 12_000,
         fragLoadingTimeOut: 12_000,
       })
@@ -269,7 +356,7 @@ export class StreamPlayer {
 
     if (action.kind === 'pause') {
       // 还差一段延迟：暂停这一路，让直播缓冲往前跑
-      this.scheduleSyncPause(action.ms)
+      this.scheduleSyncPause(action.ms, measured)
       return
     }
 
@@ -304,11 +391,13 @@ export class StreamPlayer {
   }
 
   /** 暂停 ms 毫秒来增加延迟；连续调滑杆时在现有截止时间上累加 */
-  private scheduleSyncPause(ms: number) {
+  private scheduleSyncPause(ms: number, measuredMs: number) {
     if (this.userPaused || this.state === 'stopped' || this.video.paused) return
     const now = performance.now()
     this.pauseDeadline = nextPauseDeadline(now, this.pauseDeadline, Math.min(MAX_OFFSET_MS, ms))
     this.syncPaused = true
+    this.pauseStartedAt = now
+    this.pauseStartLatency = measuredMs
     this.video.pause()
     if (this.video.playbackRate !== 1) this.video.playbackRate = 1
     this.armPauseTimer()
@@ -318,6 +407,25 @@ export class StreamPlayer {
   private extendSyncPause(ms: number) {
     const now = performance.now()
     this.pauseDeadline = nextPauseDeadline(now, this.pauseDeadline, Math.min(MAX_OFFSET_MS, ms))
+    this.armPauseTimer()
+  }
+
+  /**
+   * 暂停过程中用户把延迟调小：按已经攒到的延迟重算剩余时长。
+   * 不需要再停了就立刻恢复，避免调回 0 还要干等原来的 20 秒。
+   */
+  private reduceSyncPause() {
+    const now = performance.now()
+    const remaining = pauseRemainingFor(
+      this.desiredOffset,
+      this.pauseStartLatency,
+      now - this.pauseStartedAt
+    )
+    if (remaining <= 5) {
+      this.finishSyncPause()
+      return
+    }
+    this.pauseDeadline = now + remaining
     this.armPauseTimer()
   }
 
@@ -334,16 +442,28 @@ export class StreamPlayer {
         this.armPauseTimer()
         return
       }
-      this.syncPaused = false
-      if (this.state === 'stopped' || this.userPaused) return
-      const p = this.video.play()
-      if (p && typeof p.catch === 'function') {
-        p.catch((e: unknown) => {
-          if ((e as DOMException)?.name === 'NotAllowedError') this.onBlocked()
-        })
-      }
-      window.setTimeout(() => this.syncNow(true), 200)
+      this.finishSyncPause()
     }, left)
+  }
+
+  /** 结束补齐暂停并恢复播放，随后按新目标重新对齐 */
+  private finishSyncPause() {
+    if (this.syncTimer) {
+      clearTimeout(this.syncTimer)
+      this.syncTimer = null
+    }
+    this.syncPaused = false
+    this.pauseDeadline = 0
+    if (this.state === 'stopped' || this.userPaused) return
+    // 另一路还在卡缓冲：先不恢复，等 holdByPeer(false) 再一起播
+    if (this.peerHold) return
+    const p = this.video.play()
+    if (p && typeof p.catch === 'function') {
+      p.catch((e: unknown) => {
+        if ((e as DOMException)?.name === 'NotAllowedError') this.onBlocked()
+      })
+    }
+    window.setTimeout(() => this.syncNow(true), 200)
   }
 
   private cancelSyncPause() {
@@ -352,6 +472,8 @@ export class StreamPlayer {
       this.syncTimer = null
     }
     this.pauseDeadline = 0
+    this.pauseStartLatency = 0
+    this.pauseStartedAt = 0
     this.syncPaused = false
   }
 
@@ -415,10 +537,11 @@ export class StreamPlayer {
     this.desiredOffset = next
     if (this.state === 'stopped') return
 
-    // 正在为延迟而暂停：继续调大就顺延，调小则让这次暂停走完，
-    // 恢复后 syncNow 会 seek 到新目标。
+    // 正在为延迟而暂停：调大顺延；调小按已攒到的延迟重算，
+    // 目标已经够了就提前恢复，随后由 syncNow seek 到新目标。
     if (this.syncPaused) {
       if (delta > 0) this.extendSyncPause(delta)
+      else if (delta < 0) this.reduceSyncPause()
       return
     }
     if (this.userPaused) return
@@ -442,6 +565,8 @@ export class StreamPlayer {
   async play() {
     this.userPaused = false
     this.cancelSyncPause()
+    // 另一路还在卡缓冲：先继续停着，等对方恢复后 holdByPeer(false) 会一起播
+    if (this.peerHold) return
     try {
       await this.video.play()
       this.syncNow(true)
@@ -460,7 +585,10 @@ export class StreamPlayer {
     this.userPaused = true
     this.setState('stopped')
     this.cancelSyncPause()
+    this.clearStallTimer()
     this.video.removeEventListener('playing', this.onPlaying)
+    this.video.removeEventListener('waiting', this.onWaiting)
+    this.video.removeEventListener('pause', this.onNativePause)
     this.destroyEngine()
   }
 }
