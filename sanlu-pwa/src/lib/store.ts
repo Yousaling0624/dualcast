@@ -122,6 +122,11 @@ export interface ExtraRoom {
 
 export type ThemeMode = 'auto' | 'light' | 'dark'
 
+export interface BlockedUser {
+  uid: number
+  name: string
+}
+
 export interface Settings {
   /** 界面配色：跟随系统 / 浅色 / 深色 */
   theme: ThemeMode
@@ -137,6 +142,8 @@ export interface Settings {
     bold: boolean
     style: DanmakuStyle
     blocked: string[]
+    /** 屏蔽的用户；uid 为 0 时按昵称匹配（礼物 / 舰长消息没有 uid） */
+    blockedUsers: BlockedUser[]
   }
   video: {
     scale: VideoScale
@@ -188,6 +195,7 @@ const DEFAULT_SETTINGS: Settings = {
     bold: true,
     style: 'outline',
     blocked: [],
+    blockedUsers: [],
   },
   video: { scale: 'fit', defaultQn: 250 },
   volume: { a: 0.85, b: 1 },
@@ -247,6 +255,22 @@ function loadSettings(): Settings {
     if (typeof raw.danmaku.bold !== 'boolean') s.danmaku.bold = true
     if (typeof s.danmaku.includeB !== 'boolean') s.danmaku.includeB = false
     if (!Array.isArray(s.danmaku.blocked)) s.danmaku.blocked = []
+    const seenUsers = new Set<string>()
+    s.danmaku.blockedUsers = Array.isArray(s.danmaku.blockedUsers)
+      ? s.danmaku.blockedUsers
+          .map((u: any) =>
+            typeof u === 'string'
+              ? { uid: 0, name: u.trim() }
+              : { uid: Number(u?.uid) || 0, name: String(u?.name ?? '').trim() }
+          )
+          .filter((u) => {
+            const key = u.uid > 0 ? `uid:${u.uid}` : u.name ? `name:${u.name}` : ''
+            if (!key || seenUsers.has(key)) return false
+            seenUsers.add(key)
+            return true
+          })
+          .slice(0, 200)
+      : []
   }
   if (raw.video && typeof raw.video === 'object') {
     Object.assign(s.video, raw.video)
@@ -573,6 +597,46 @@ export function shouldShowSourceBadges(): boolean {
   )
 }
 
+type UserRef = { uid?: number; uname?: string }
+
+function sameBlockedUser(m: UserRef, u: BlockedUser): boolean {
+  const uid = Number(m.uid) || 0
+  // 有 uid 就认 uid，改昵称也还能挡住；没有 uid 的礼物 / 舰长消息只能按昵称
+  if (u.uid > 0) return uid > 0 && uid === u.uid
+  const name = (m.uname || '').trim()
+  return !!name && u.name === name
+}
+
+/** 这条消息的发送者是否已被屏蔽 */
+export function isUserBlocked(m: UserRef): boolean {
+  return store.settings.danmaku.blockedUsers.some((u) => sameBlockedUser(m, u))
+}
+
+/** 把发送者加入屏蔽名单，并清掉聊天室里已经收到的消息 */
+export function blockUser(m: UserRef): boolean {
+  const name = (m.uname || '').trim()
+  const uid = Number(m.uid) || 0
+  if (!uid && !name) return false
+  const user: BlockedUser = { uid, name }
+  const ref: UserRef = { uid, uname: name }
+  if (store.settings.danmaku.blockedUsers.some((u) => sameBlockedUser(ref, u))) return false
+  store.settings.danmaku.blockedUsers.push(user)
+  store.messages = store.messages.filter((x) => !sameBlockedUser(x, user))
+  store.scFeed = store.scFeed.filter((x) => !sameBlockedUser(x, user))
+  for (let i = feedBuffer.length - 1; i >= 0; i--) {
+    if (sameBlockedUser(feedBuffer[i], user)) feedBuffer.splice(i, 1)
+  }
+  return true
+}
+
+/** 从屏蔽名单移除 */
+export function unblockUser(uid: number, name: string) {
+  const id = Number(uid) || 0
+  store.settings.danmaku.blockedUsers = store.settings.danmaku.blockedUsers.filter(
+    (u) => !((id > 0 && u.uid === id) || (id === 0 && u.name === name))
+  )
+}
+
 function enrichMessage(m: ChatMsg, sourceId: string): ChatMsg {
   const meta = sourceMeta(sourceId)
   if (!meta) return m
@@ -594,6 +658,9 @@ function ingest(sourceId: string, raw: ChatMsg) {
 }
 
 function pushMessage(m: ChatMsg) {
+  // 礼物提示（「观众 送出 礼物 ×1」）不展示，直接丢弃
+  if (m.kind === 'gift') return
+  if (isUserBlocked(m)) return
   if (m.self && consumeSelfEcho(m.text, m.sourceRoomId)) return
   if (hasDmid(m.dmid)) return
   const msg: ChatMsg = { ...m, seq: m.seq || 900000000 + ++pushSeq }
@@ -612,7 +679,7 @@ function insertHistory(sourceId: string, list: ChatMsg[]) {
   const meta = sourceMeta(sourceId)
   if (!meta) return
   const fresh = list
-    .filter((m) => m.text && !hasDmid(m.dmid))
+    .filter((m) => m.text && m.kind !== 'gift' && !isUserBlocked(m) && !hasDmid(m.dmid))
     .map((m, i) =>
       enrichMessage(
         {

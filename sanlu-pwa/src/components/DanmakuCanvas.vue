@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { feedBuffer, shouldShowSourceBadges, store } from '../lib/store'
+import { feedBuffer, isUserBlocked, shouldShowSourceBadges, store } from '../lib/store'
 import type { ChatMsg } from '../lib/danmaku'
 
 const canvas = ref<HTMLCanvasElement | null>(null)
@@ -145,6 +145,8 @@ function spawn() {
     if (!d.enabled || !m.text || m.history) continue
     // SC 由画面上的 SuperChatOverlay 负责，不再挤在弹幕轨道里
     if (m.kind === 'sc') continue
+    // 礼物提示不飘；被屏蔽用户的弹幕也不飘
+    if (m.kind === 'gift' || isUserBlocked(m)) continue
     const lower = m.text.toLowerCase()
     if (d.blocked.some((w) => w && lower.includes(w.toLowerCase()))) continue
 
@@ -476,7 +478,15 @@ onBeforeUnmount(() => {
 
 watch(
   () => store.settings.danmaku,
-  () => layout(),
+  () => {
+    layout()
+    // 刚屏蔽的用户，屏幕上还在飘的弹幕也立刻收掉
+    for (let i = items.length - 1; i >= 0; i--) {
+      if (!isUserBlocked(items[i].msg)) continue
+      if (items[i].msg.seq === frozenSeq) frozenSeq = 0
+      items.splice(i, 1)
+    }
+  },
   { deep: true }
 )
 </script>

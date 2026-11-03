@@ -34,6 +34,7 @@ type IconName =
   | 'sparkles'
   | 'crop'
   | 'flag'
+  | 'block'
   | 'more'
 
 const props = withDefaults(
@@ -106,6 +107,9 @@ const paths: Record<IconName, string[]> = {
     'M7 3H5v2H3v2h2v10a2 2 0 0 0 2 2h10v2h2v-2h2v-2h-2V7a2 2 0 0 0-2-2H7V3zm0 4h10v10H7V7z',
   ],
   flag: ['M14.4 6 14 4H5v17h2v-7h5.6l.4 2h7V6h-5.6z'],
+  block: [
+    'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zM4 12c0-4.42 3.58-8 8-8 1.85 0 3.55.63 4.9 1.69L5.69 16.9A7.96 7.96 0 0 1 4 12zm8 8c-1.85 0-3.55-.63-4.9-1.69L18.31 7.1A7.96 7.96 0 0 1 20 12c0 4.42-3.58 8-8 8z',
+  ],
   more: ['M6 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'],
 }
 

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
+  blockUser,
   buildReply,
   canInteract,
   clearSendError,
@@ -116,6 +117,15 @@ function focusReply(target: ChatMsg) {
 
 function doReply() {
   if (selected.value) focusReply(selected.value)
+}
+
+/** 屏蔽选中的用户：他的弹幕、SC 和已经收到的消息都会一起消失 */
+function doBlockSelected() {
+  const m = selected.value
+  if (!m) return
+  blockUser(m)
+  hint.value = `已屏蔽 ${m.uname || '该用户'}`
+  selected.value = null
 }
 
 async function doPlusOne(target?: ChatMsg | null) {
@@ -376,6 +386,15 @@ defineExpose({ focus: () => focusInput.value?.focus() })
         <button v-if="canInteract(selected)" class="chip" @click="doReply">
           <AppIcon name="reply" :size="14" />
           回复
+        </button>
+        <button
+          v-if="selected.uname && !selected.self"
+          class="chip"
+          title="以后不再显示这个用户的弹幕"
+          @click="doBlockSelected"
+        >
+          <AppIcon name="block" :size="14" />
+          屏蔽
         </button>
         <button class="chip dim" @click="selected = null">
           <AppIcon name="close" :size="14" />

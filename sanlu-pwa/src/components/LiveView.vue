@@ -4,6 +4,7 @@ import {
   addSource,
   attachStreams,
   bindVideos,
+  blockUser,
   buildReply,
   debugSnapshot,
   canInteract,
@@ -817,6 +818,13 @@ function doQuickPlusOne() {
   })
 }
 
+/** 屏蔽这条弹幕的发送者：他的弹幕、SC 和聊天室消息都会一起消失 */
+function doQuickBlockUser() {
+  if (!quickTarget.value) return
+  blockUser(quickTarget.value)
+  closeQuick()
+}
+
 async function doQuickAnswer() {
   if (!store.loggedIn) {
     quickHint.value = '先登录 B 站账号才能回复'
@@ -1528,6 +1536,15 @@ onBeforeUnmount(() => {
               </button>
             </template>
             <button v-else class="qbtn plus" @click="openSettings('account')">去登录</button>
+            <button
+              v-if="quickTarget.uname && !quickTarget.self"
+              class="qbtn"
+              title="以后不再显示这个用户的弹幕"
+              @click="doQuickBlockUser"
+            >
+              <AppIcon name="block" :size="15" />
+              屏蔽
+            </button>
             <button class="qbtn dim" @click="closeQuick">关闭</button>
           </div>
         </template>

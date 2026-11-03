@@ -14,6 +14,7 @@ import {
   setQuality,
   setVolume,
   store,
+  unblockUser,
   updateSource,
 } from '../lib/store'
 import type { ExtraRoom } from '../lib/store'
@@ -604,6 +605,33 @@ defineOptions({ name: 'SettingsDrawer' })
                     </button>
                   </div>
                   <textarea v-model="blockedText" class="field" rows="2" placeholder="比如：抽奖, 活动, 关注"></textarea>
+                </div>
+
+                <div v-if="store.settings.danmaku.blockedUsers.length" class="row col">
+                  <div class="range-label">
+                    <span class="row-text">
+                      <strong>屏蔽用户</strong>
+                      <small>点画面弹幕或聊天室里的「屏蔽用户」添加；点名字可解除</small>
+                    </span>
+                    <button
+                      class="text-btn"
+                      @click="store.settings.danmaku.blockedUsers = []"
+                    >
+                      清空（{{ store.settings.danmaku.blockedUsers.length }}）
+                    </button>
+                  </div>
+                  <div class="blocked-users">
+                    <button
+                      v-for="u in store.settings.danmaku.blockedUsers"
+                      :key="u.uid || u.name"
+                      class="blocked-user"
+                      :title="`解除屏蔽 ${u.name || 'UID ' + u.uid}`"
+                      @click="unblockUser(u.uid, u.name)"
+                    >
+                      <span>{{ u.name || `UID ${u.uid}` }}</span>
+                      <AppIcon name="close" :size="11" />
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -1953,6 +1981,37 @@ input[type='range'] {
   font-weight: 600;
   cursor: pointer;
   padding: 2px 0;
+}
+
+.blocked-users {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.blocked-user {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-soft);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.blocked-user span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.blocked-user:hover {
+  border-color: var(--accent);
+  color: var(--accent-strong);
 }
 
 .offset-group {
