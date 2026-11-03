@@ -35,6 +35,7 @@ type IconName =
   | 'crop'
   | 'flag'
   | 'block'
+  | 'commentary'
   | 'more'
 
 const props = withDefaults(
@@ -109,6 +110,9 @@ const paths: Record<IconName, string[]> = {
   flag: ['M14.4 6 14 4H5v17h2v-7h5.6l.4 2h7V6h-5.6z'],
   block: [
     'M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zM4 12c0-4.42 3.58-8 8-8 1.85 0 3.55.63 4.9 1.69L5.69 16.9A7.96 7.96 0 0 1 4 12zm8 8c-1.85 0-3.55-.63-4.9-1.69L18.31 7.1A7.96 7.96 0 0 1 20 12c0 4.42-3.58 8-8 8z',
+  ],
+  commentary: [
+    'M21 3H3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H3V5h18v14zM6 8h8v1.6H6zm0 3.7h12v1.6H6zm0 3.7h9v1.6H6z',
   ],
   more: ['M6 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'],
 }

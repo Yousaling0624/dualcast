@@ -62,7 +62,6 @@ const controls = ref(true)
 /** 底栏弹幕输入框是否聚焦：聚焦时不让控件自动隐藏 */
 const dockFocused = ref(false)
 let hideTimer: number | null = null
-const qualityOpen = ref(false)
 const chatCollapsed = ref(false)
 const isFullscreen = ref(false)
 let collapsedBeforeFullscreen = false
@@ -152,16 +151,9 @@ const quickReply = ref(false)
 const quickText = ref('')
 const quickHint = ref('')
 
-const hoverCapable =
-  typeof window !== 'undefined' && window.matchMedia('(hover: hover) and (pointer: fine)').matches
 let hoverOpenTimer: number | null = null
 let hoverCloseTimer: number | null = null
 let hoverCandidate = { seq: 0, x: 0, y: 0 }
-
-const qnLabel = computed(() => {
-  const slot = store.b
-  return slot.qn ? slot.acceptQn.find((x) => x.qn === slot.qn)?.desc || `${slot.qn}` : '画质'
-})
 
 const videoFit = computed(() => {
   if (store.settings.video.scale === 'crop') return 'cover'
@@ -229,7 +221,6 @@ function hideControls() {
   // 输入框聚焦时一律不自动收控件，否则正在打的弹幕会跟着输入框一起消失
   if (dockFocused.value) return
   controls.value = false
-  qualityOpen.value = false
   multiOpen.value = false
   moreOpen.value = false
   // 主画面控件和小窗按钮统一成一套沉浸状态：收就一起收
@@ -245,7 +236,7 @@ function onZoneTap(e: PointerEvent) {
   const t = e.target as HTMLElement
   if (
     t.closest(
-      'button, .mini, .quality, .quickbar, .multi-wall, input, .topbar, .bottombar, .crop-layer, .crop-actions'
+      'button, .mini, .quickbar, .multi-wall, input, .topbar, .bottombar, .crop-layer, .crop-actions'
     )
   )
     return
@@ -320,13 +311,15 @@ function pointerInRect(e: PointerEvent, hit: DmHit | null): boolean {
 function onZoneMove(e: PointerEvent) {
   // 触屏只在点按时切换控件；鼠标移动仍然自动唤出，贴近桌面播放器习惯
   if (e.pointerType === 'mouse') reveal()
-  if (!hoverCapable || e.pointerType !== 'mouse') return
+  // 只认鼠标指针，不再依赖 matchMedia('(hover: hover)')：
+  // 触屏笔记本、后接鼠标的平板也能悬停；手指 / 手写笔仍然走点按
+  if (e.pointerType !== 'mouse') return
   const t = e.target as HTMLElement
   if (t.closest('.quickbar')) {
     cancelHoverClose()
     return
   }
-  if (t.closest('.topbar, .bottombar, .mini, .multi-wall, .quality, button, input')) return
+  if (t.closest('.topbar, .bottombar, .mini, .multi-wall, button, input')) return
   if (quickTarget.value) {
     const hit = dmCanvas.value?.rectFor(quickTarget.value.seq) || null
     if (pointerInRect(e, hit)) cancelHoverClose()
@@ -420,8 +413,6 @@ function enterPip() {
 
 function chooseQuality(qn: number) {
   setQuality('b', qn)
-  qualityOpen.value = false
-  reveal()
 }
 
 function clearMiniTap() {
@@ -1174,39 +1165,6 @@ onBeforeUnmount(() => {
               {{ statusLabel }}
             </small>
           </div>
-          <div class="actions">
-            <button class="ib" title="重连" :disabled="store.reconnecting" @click="reconnect">
-              <AppIcon name="refresh" :size="18" :class="{ spin: store.reconnecting }" />
-            </button>
-            <button class="ib" :class="{ on: miniOn }" title="A 解说小窗" @click="toggleMini()">
-              <AppIcon name="pip" :size="18" />
-            </button>
-            <button class="qn-pill" title="画质" @click="qualityOpen = !qualityOpen">
-              {{ qnLabel }}
-              <AppIcon name="chevron-down" :size="13" />
-            </button>
-          </div>
-        </div>
-      </Transition>
-
-      <!-- 画质菜单 -->
-      <Transition name="fade">
-        <div v-if="controls && qualityOpen" class="quality" @pointerdown.stop>
-          <div class="quality-head">
-            <span>画质</span>
-            <small>B 路画面</small>
-          </div>
-          <button
-            v-for="q in store.b.acceptQn"
-            :key="q.qn"
-            :class="{ on: q.qn === store.b.qn }"
-            :disabled="store.qualitySwitching"
-            @click="chooseQuality(q.qn)"
-          >
-            <span>{{ q.desc }}</span>
-            <AppIcon v-if="q.qn === store.b.qn" name="check" :size="15" />
-          </button>
-          <p v-if="!store.b.acceptQn.length">开播后可选</p>
         </div>
       </Transition>
 
@@ -1329,7 +1287,7 @@ onBeforeUnmount(() => {
           <button
             class="dock-btn"
             :class="{ on: moreOpen }"
-            title="更多功能：切画面、SC、混音、画面、画中画、设置"
+            title="更多功能：切画面、画质、混音、延迟、画面、画中画、设置"
             @click="toggleMore"
           >
             <AppIcon name="more" :size="17" />
@@ -1406,6 +1364,26 @@ onBeforeUnmount(() => {
                   <small>系统悬浮小窗</small>
                 </span>
               </button>
+              <button class="more-item" @click="moreAct(toggleMini)">
+                <span class="mi-icon"><AppIcon name="commentary" :size="18" /></span>
+                <span class="mi-text">
+                  <strong>解说小窗</strong>
+                  <small>{{ miniOn ? '已显示，点击关闭' : '显示 A 路解说' }}</small>
+                </span>
+              </button>
+              <button
+                class="more-item"
+                :disabled="store.reconnecting"
+                @click="moreAct(reconnect)"
+              >
+                <span class="mi-icon">
+                  <AppIcon name="refresh" :size="18" :class="{ spin: store.reconnecting }" />
+                </span>
+                <span class="mi-text">
+                  <strong>重连</strong>
+                  <small>{{ store.reconnecting ? '重连中…' : '重新拉流' }}</small>
+                </span>
+              </button>
               <button class="more-item" @click="moreAct(() => openSettings('danmaku'))">
                 <span class="mi-icon"><AppIcon name="danmaku" :size="18" /></span>
                 <span class="mi-text">
@@ -1420,6 +1398,25 @@ onBeforeUnmount(() => {
                   <small>账号、主题与更多</small>
                 </span>
               </button>
+            </div>
+
+            <div class="more-quality">
+              <div class="mq-head">
+                <span>B 路画质</span>
+                <small>{{ store.qualitySwitching ? '切换中…' : store.b.title || '直播画面' }}</small>
+              </div>
+              <div class="mq-pills">
+                <button
+                  v-for="q in store.b.acceptQn"
+                  :key="q.qn"
+                  :class="{ on: q.qn === store.b.qn }"
+                  :disabled="store.qualitySwitching"
+                  @click="chooseQuality(q.qn)"
+                >
+                  {{ q.desc }}
+                </button>
+                <span v-if="!store.b.acceptQn.length" class="mq-empty">开播后可选</span>
+              </div>
             </div>
           </div>
         </div>
@@ -1713,6 +1710,11 @@ onBeforeUnmount(() => {
   background: #000;
 }
 
+/* 全屏不显示顶栏，只留画面和底栏 */
+.video-zone:fullscreen .topbar {
+  display: none;
+}
+
 /* 全屏时底栏也居中，和平时保持一致 */
 .video-zone:fullscreen .bottombar {
   left: 50%;
@@ -1853,13 +1855,6 @@ onBeforeUnmount(() => {
   background: #ff5a5f;
 }
 
-.actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
-}
-
 .ib {
   width: 32px;
   height: 32px;
@@ -1897,97 +1892,8 @@ onBeforeUnmount(() => {
   background: transparent;
 }
 
-.qn-pill {
-  height: 30px;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  border: none;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.09);
-  color: #fff8ef;
-  padding: 0 9px;
-  font-size: 11px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
 .spin {
   animation: spin 0.9s linear infinite;
-}
-
-/* 画质菜单 */
-.quality {
-  position: absolute;
-  top: calc(56px + var(--safe-top));
-  right: calc(10px + var(--safe-right));
-  background: rgba(28, 25, 22, 0.94);
-  border: 1px solid rgba(255, 255, 255, 0.13);
-  border-radius: 16px;
-  padding: 7px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  z-index: 7;
-  min-width: 148px;
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.45);
-  backdrop-filter: blur(22px);
-  animation: popIn 0.18s ease;
-}
-
-.quality-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  padding: 5px 8px 7px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  margin-bottom: 3px;
-}
-
-.quality-head span {
-  font-size: 12px;
-  font-weight: 600;
-  color: #fff8ef;
-}
-
-.quality-head small {
-  font-size: 9.5px;
-  color: rgba(255, 248, 239, 0.45);
-}
-
-.quality button {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  border: none;
-  background: transparent;
-  color: rgba(255, 248, 239, 0.76);
-  text-align: left;
-  padding: 7px 8px;
-  border-radius: 9px;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.quality button:hover {
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.quality button.on {
-  background: var(--accent);
-  color: #fff;
-  font-weight: 600;
-}
-
-.quality button:disabled {
-  opacity: 0.5;
-}
-
-.quality p {
-  margin: 4px 8px 6px;
-  font-size: 11px;
-  color: rgba(255, 248, 239, 0.45);
 }
 
 /* ---------- 底部控制条 ---------- */
@@ -2312,6 +2218,65 @@ onBeforeUnmount(() => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.more-quality {
+  margin-top: 8px;
+  padding: 9px 10px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.mq-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.mq-head small {
+  min-width: 0;
+  font-size: 9.5px;
+  font-weight: 400;
+  color: rgba(255, 248, 239, 0.45);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mq-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.mq-pills button {
+  border: none;
+  border-radius: 999px;
+  padding: 5px 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 248, 239, 0.72);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.mq-pills button.on {
+  background: var(--accent);
+  color: #fff;
+  font-weight: 600;
+}
+
+.mq-pills button:disabled {
+  opacity: 0.5;
+}
+
+.mq-empty {
+  font-size: 10.5px;
+  color: rgba(255, 248, 239, 0.4);
 }
 
 /* ---------- 多路快捷面板 ---------- */
@@ -3257,19 +3222,9 @@ onBeforeUnmount(() => {
     border-radius: 16px;
   }
 
-  .actions {
-    gap: 2px;
-  }
-
   .ib {
     width: 30px;
     height: 30px;
-  }
-
-  .qn-pill {
-    height: 28px;
-    padding: 0 7px;
-    font-size: 10px;
   }
 
   .video-zone.mini-open :deep(.sc-overlay) {
