@@ -14,6 +14,8 @@ import {
   reconnect,
   removeSource,
   replyInputLimit,
+  resetOffset,
+  setOffset,
   resumePlayback,
   retryDanmaku,
   send,
@@ -247,6 +249,11 @@ function onZoneTap(e: PointerEvent) {
     )
   )
     return
+  // 延迟悬浮条开着时，点画面空白处先把它收起来
+  if (offsetOpen.value) {
+    closeOffsetBar()
+    return
+  }
   // 正在输入弹幕时点画面：先收起键盘，不立刻把输入框和控件一起收掉
   if (dockFocused.value) {
     ;(document.activeElement as HTMLElement | null)?.blur()
@@ -841,13 +848,11 @@ async function doQuickSend() {
   if (ok) closeQuick()
 }
 
-async function openSettings(
+function openSettings(
   tab: 'account' | 'danmaku' | 'multi' | 'mix' | 'video' | 'relay' | 'about'
 ) {
-  // 设置面板 Teleport 到 body，不在全屏子树里；先退出全屏再打开
-  if (document.fullscreenElement) {
-    await document.exitFullscreen().catch(() => {})
-  }
+  // 全屏时面板会 Teleport 进全屏元素，不用再退出全屏
+  closeOffsetBar()
   drawer.value?.open(tab)
 }
 
@@ -879,6 +884,53 @@ const moreOpen = ref(false)
 const dockText = ref('')
 const dockHint = ref('')
 let dockHintTimer: number | null = null
+
+/* ---------- 延迟悬浮调节条：全屏时也不再打开整页设置 ---------- */
+
+const offsetOpen = ref(false)
+let offsetTimer: number | null = null
+
+const offsetLabel = computed(() => {
+  const ms = store.sessionOffset
+  const s = (Math.abs(ms) / 1000).toFixed(1)
+  if (!ms) return '0.0s'
+  // 正数表示 A（解说）晚，负数表示 B（画面）晚
+  return `${ms > 0 ? 'A+' : 'B+'}${s}s`
+})
+
+function closeOffsetBar() {
+  offsetOpen.value = false
+  if (offsetTimer) {
+    clearTimeout(offsetTimer)
+    offsetTimer = null
+  }
+}
+
+/** 像系统亮度条一样，松手几秒后自动收起 */
+function bumpOffsetTimer() {
+  if (offsetTimer) clearTimeout(offsetTimer)
+  offsetTimer = window.setTimeout(() => {
+    offsetTimer = null
+    offsetOpen.value = false
+  }, 6000)
+}
+
+function openOffsetBar() {
+  moreOpen.value = false
+  offsetOpen.value = true
+  reveal()
+  bumpOffsetTimer()
+}
+
+function onOffsetInput(e: Event) {
+  setOffset(Number((e.target as HTMLInputElement).value))
+  bumpOffsetTimer()
+}
+
+function resetOffsetFloat() {
+  resetOffset()
+  bumpOffsetTimer()
+}
 
 function showDockHint(text: string) {
   dockHint.value = text
@@ -1070,6 +1122,7 @@ onBeforeUnmount(() => {
   zoneObserver = null
   if (hideTimer) clearTimeout(hideTimer)
   if (dockHintTimer) clearTimeout(dockHintTimer)
+  if (offsetTimer) clearTimeout(offsetTimer)
   clearMiniTap()
   exitMiniImmersive()
   cancelHoverClose()
@@ -1328,8 +1381,15 @@ onBeforeUnmount(() => {
               <button class="more-item" @click="moreAct(() => openSettings('mix'))">
                 <span class="mi-icon"><AppIcon name="tune" :size="18" /></span>
                 <span class="mi-text">
-                  <strong>混音 / 延迟</strong>
-                  <small>音量与对齐</small>
+                  <strong>混音</strong>
+                  <small>两路音量配比</small>
+                </span>
+              </button>
+              <button class="more-item" @click="moreAct(openOffsetBar)">
+                <span class="mi-icon"><AppIcon name="clock" :size="18" /></span>
+                <span class="mi-text">
+                  <strong>延迟</strong>
+                  <small>悬浮调节条</small>
                 </span>
               </button>
               <button class="more-item" @click="moreAct(() => openSettings('video'))">
@@ -1362,6 +1422,35 @@ onBeforeUnmount(() => {
               </button>
             </div>
           </div>
+        </div>
+      </Transition>
+
+      <!-- 延迟悬浮调节条：像系统亮度条，调完几秒自动收 -->
+      <Transition name="up">
+        <div v-if="offsetOpen" class="offset-float" @pointerdown.stop @click.stop>
+          <span class="of-icon"><AppIcon name="clock" :size="15" /></span>
+          <input
+            class="of-range"
+            type="range"
+            min="-20000"
+            max="20000"
+            step="50"
+            :value="store.sessionOffset"
+            :style="{ '--fill': ((store.sessionOffset + 20000) / 40000) * 100 + '%' }"
+            aria-label="音画延迟"
+            @input="onOffsetInput"
+          />
+          <button
+            class="of-value"
+            :class="{ zero: !store.sessionOffset }"
+            :title="store.sessionOffset > 0 ? 'A 路（解说）晚一些' : store.sessionOffset < 0 ? 'B 路（画面）晚一些' : '两路同步，点按归零'"
+            @click="resetOffsetFloat"
+          >
+            {{ offsetLabel }}
+          </button>
+          <button class="of-x" title="收起" @click="closeOffsetBar">
+            <AppIcon name="close" :size="14" />
+          </button>
         </div>
       </Transition>
 
@@ -1589,7 +1678,7 @@ onBeforeUnmount(() => {
       </button>
     </div>
 
-    <SettingsDrawer ref="drawer" />
+    <SettingsDrawer ref="drawer" :fullscreen-el="isFullscreen ? zoneEl : null" />
   </div>
 </template>
 
@@ -2860,6 +2949,124 @@ onBeforeUnmount(() => {
 
 .qbtn:disabled {
   opacity: 0.45;
+}
+
+/* ---------- 延迟悬浮调节条 ---------- */
+
+.offset-float {
+  position: absolute;
+  left: 50%;
+  bottom: calc(70px + var(--safe-bottom));
+  transform: translateX(-50%);
+  z-index: 9;
+  width: min(440px, calc(100% - 24px));
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px 0 12px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(30, 27, 23, 0.86), rgba(16, 14, 12, 0.82));
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 14px 38px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(22px) saturate(1.15);
+  color: #fff8ef;
+}
+
+.of-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 248, 239, 0.68);
+}
+
+.of-range {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.of-range::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--accent) var(--fill),
+    rgba(255, 255, 255, 0.2) var(--fill)
+  );
+}
+
+.of-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.of-range::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.of-range::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.of-range::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  border: 2px solid var(--accent);
+}
+
+.of-value {
+  flex: 0 0 auto;
+  min-width: 52px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff8ef;
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.of-value.zero {
+  color: rgba(255, 248, 239, 0.5);
+}
+
+.of-x {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(255, 248, 239, 0.6);
+  cursor: pointer;
+}
+
+.of-x:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff8ef;
 }
 
 /* ---------- 错误提示 ---------- */

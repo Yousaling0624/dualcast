@@ -1,5 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+
+/**
+ * 全屏时要把面板 Teleport 到全屏元素里面，否则浏览器只渲染全屏子树，
+ * 面板看不见就只能先退出全屏。非全屏仍挂到 body。
+ */
+const props = defineProps<{ fullscreenEl?: HTMLElement | null }>()
 import QRCode from 'qrcode'
 import {
   addSource,
@@ -331,7 +337,7 @@ defineOptions({ name: 'SettingsDrawer' })
 </script>
 
 <template>
-  <Teleport to="body">
+  <Teleport :to="props.fullscreenEl || 'body'">
     <Transition name="sheet">
       <div v-if="visible" class="mask" @click.self="close">
         <div class="sheet" role="dialog" aria-modal="true" aria-label="设置">
