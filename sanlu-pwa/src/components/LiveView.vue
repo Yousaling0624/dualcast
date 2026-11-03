@@ -5,7 +5,6 @@ import {
   attachStreams,
   bindVideos,
   blockUser,
-  buildReply,
   debugSnapshot,
   canInteract,
   clearSendError,
@@ -182,9 +181,6 @@ const statusLabel = computed(() => {
 })
 
 const quickLimit = computed(() => (quickTarget.value ? replyInputLimit(quickTarget.value) : 20))
-const quickPreview = computed(() =>
-  quickTarget.value && quickText.value.trim() ? buildReply(quickText.value, quickTarget.value) : ''
-)
 
 const firstError = computed(
   () =>
@@ -777,11 +773,11 @@ function openQuick(hit: DmHit, mode: 'click' | 'hover') {
   if (rect) {
     const spaceAbove = Math.max(0, hit.y - 10)
     const spaceBelow = Math.max(0, rect.height - hit.bottom - 10)
-    // 上方放不下简洁操作条、且下面确实更宽裕时，才翻到下方。
-    const below = spaceAbove < 280 && spaceBelow > spaceAbove
-    const half = Math.min(260, Math.max(80, (rect.width - 20) / 2))
-    const left = Math.max(half + 6, Math.min(rect.width - half - 6, hit.x + hit.w / 2))
-    const top = below ? Math.min(rect.height - 10, hit.bottom + 8) : Math.max(10, hit.y - 8)
+    // 操作条只有一条胶囊高，上方有一点空间就够；放不下再翻到下方。
+    const below = spaceAbove < 90 && spaceBelow > spaceAbove
+    const half = Math.min(190, Math.max(70, (rect.width - 16) / 2))
+    const left = Math.max(half + 4, Math.min(rect.width - half - 4, hit.x + hit.w / 2))
+    const top = below ? Math.min(rect.height - 8, hit.bottom + 8) : Math.max(6, hit.y - 8)
     quickAnchor.value = {
       left,
       top,
@@ -1494,92 +1490,68 @@ onBeforeUnmount(() => {
         @mouseenter="cancelHoverClose"
         @mouseleave="scheduleHoverClose"
       >
-        <div class="quick-head">
-          <span
-            class="quick-avatar"
-            :style="quickTarget.sourceColor ? { background: quickTarget.sourceColor } : undefined"
-          >
-            {{ (quickTarget.uname || '匿').slice(0, 1) }}
-          </span>
-          <div class="quick-who">
-            <strong>{{ quickTarget.uname || '匿名' }}</strong>
-            <small>
-              <span
-                v-if="quickTarget.sourceId && quickTarget.sourceId !== 'a'"
-                class="quick-source"
-                :style="{ color: quickTarget.sourceColor }"
-              >
-                {{ quickTarget.sourceName }}
-              </span>
-              <span v-if="quickTarget.medal">{{ quickTarget.medal }}</span>
-            </small>
-          </div>
-          <span class="quick-frozen">已暂停</span>
-          <button class="quick-x" @click="closeQuick">
-            <AppIcon name="close" :size="16" />
-          </button>
-        </div>
-        <p class="quick-text">{{ quickTarget.text }}</p>
-
         <template v-if="!quickReply">
-          <p v-if="quickHint" class="quick-hint">{{ quickHint }}</p>
-          <p v-else-if="store.sendState.error" class="quick-hint">{{ store.sendState.error }}</p>
-          <div class="quick-actions">
-            <template v-if="store.loggedIn">
-              <button v-if="canInteract(quickTarget)" class="qbtn plus" @click="doQuickPlusOne">
-                <AppIcon name="plus" :size="15" />
-                +1
-              </button>
-              <button v-if="canInteract(quickTarget)" class="qbtn" @click="doQuickAnswer">
-                <AppIcon name="reply" :size="15" />
-                回复
-              </button>
-            </template>
-            <button v-else class="qbtn plus" @click="openSettings('account')">去登录</button>
+          <div class="quick-pill" role="toolbar" aria-label="弹幕快捷操作">
+            <button
+              v-if="canInteract(quickTarget)"
+              class="qbtn plus"
+              title="+1"
+              @click="doQuickPlusOne"
+            >
+              <AppIcon name="plus" :size="14" />
+              +1
+            </button>
+            <button
+              v-if="canInteract(quickTarget)"
+              class="qbtn"
+              title="回复"
+              @click="doQuickAnswer"
+            >
+              <AppIcon name="reply" :size="14" />
+              回复
+            </button>
             <button
               v-if="quickTarget.uname && !quickTarget.self"
               class="qbtn"
               title="以后不再显示这个用户的弹幕"
               @click="doQuickBlockUser"
             >
-              <AppIcon name="block" :size="15" />
+              <AppIcon name="block" :size="14" />
               屏蔽
             </button>
-            <button class="qbtn dim" @click="closeQuick">关闭</button>
+            <button class="quick-x" title="关闭" @click="closeQuick">
+              <AppIcon name="close" :size="14" />
+            </button>
           </div>
+          <p v-if="quickHint || store.sendState.error" class="quick-hint">
+            {{ quickHint || store.sendState.error }}
+          </p>
         </template>
 
         <template v-else>
-          <div class="quick-input-row">
+          <div class="quick-pill reply">
             <input
               ref="quickInput"
               v-model="quickText"
               :maxlength="quickLimit"
-              :placeholder="`回复 @${quickTarget.uname || '匿名'}`"
+              placeholder="回复…"
               @keydown.enter="(e) => !e.isComposing && doQuickSend()"
             />
             <button
-              class="qbtn send-mini"
+              class="qbtn plus send-mini"
+              title="发送"
               :disabled="!quickText.trim() || store.sendState.sending"
               @click="doQuickSend"
             >
-              <AppIcon name="send" :size="16" />
+              <AppIcon name="send" :size="15" />
+            </button>
+            <button class="quick-x" title="取消" @click="closeQuick">
+              <AppIcon name="close" :size="14" />
             </button>
           </div>
-          <p v-if="quickPreview" class="quick-preview">将发送：{{ quickPreview }}</p>
-          <p v-if="quickHint" class="quick-hint">{{ quickHint }}</p>
-          <p v-else-if="store.sendState.error" class="quick-hint">{{ store.sendState.error }}</p>
-          <div class="quick-actions">
-            <span class="quick-count">{{ quickText.length }}/{{ quickLimit }}</span>
-            <button class="qbtn dim" @click="quickReply = false; quickText = ''">取消</button>
-            <button
-              class="qbtn plus"
-              :disabled="!quickText.trim() || store.sendState.sending"
-              @click="doQuickSend"
-            >
-              {{ store.sendState.sending ? '发送中…' : '发送' }}
-            </button>
-          </div>
+          <p v-if="quickHint || store.sendState.error" class="quick-hint">
+            {{ quickHint || store.sendState.error }}
+          </p>
         </template>
       </div>
 
@@ -2749,25 +2721,30 @@ onBeforeUnmount(() => {
 
 /* ---------- 弹幕快捷条 ---------- */
 
+/*
+ * 点中弹幕后只浮一条胶囊：+1 / 回复 / 屏蔽 / 关闭。
+ * 不重复显示昵称和弹幕内容，尽量少占画面。
+ */
 .quickbar {
   position: absolute;
   left: 50%;
   transform: translate(-50%, calc(-100% - 4px));
-  width: min(520px, calc(100% - 20px));
-  max-height: calc(100% - 20px);
-  overflow-y: auto;
+  width: max-content;
+  max-width: calc(100% - 16px);
   z-index: 12;
-  background: rgba(255, 251, 244, 0.98);
-  border: 1px solid rgba(255, 255, 255, 0.7);
-  border-radius: 22px;
-  padding: 13px 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.42);
+  align-items: center;
+  gap: 4px;
+  /* 胶囊始终是浅色底，文字固定用深色，深色主题下也不会看不清 */
+  color: #201d19;
   animation: fadeUp 0.16s ease;
-  color: var(--text);
-  backdrop-filter: blur(20px);
+  /* 胶囊之间的空白不挡画面点击 */
+  pointer-events: none;
+}
+
+.quickbar > * {
+  pointer-events: auto;
 }
 
 .quickbar.below {
@@ -2778,173 +2755,107 @@ onBeforeUnmount(() => {
   animation: none;
 }
 
-.quick-head {
+.quick-pill {
   display: flex;
   align-items: center;
-  gap: 9px;
-}
-
-.quick-avatar {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  display: grid;
-  place-items: center;
-  color: #fff;
-  font-size: 12px;
-  font-weight: 650;
-  background: linear-gradient(135deg, var(--accent), var(--accent-2));
-  flex: 0 0 auto;
-}
-
-.quick-who {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
   gap: 1px;
-}
-
-.quick-who strong {
-  font-size: 12.5px;
-  color: var(--accent-strong);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.quick-who small {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 9.5px;
-  color: var(--text-faint);
-  min-width: 0;
-}
-
-.quick-source {
-  font-weight: 650;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.quick-frozen {
-  flex: 0 0 auto;
-  font-size: 9px;
-  font-weight: 650;
-  color: var(--accent-strong);
-  background: var(--accent-soft);
+  max-width: 100%;
+  padding: 3px;
   border-radius: 999px;
-  padding: 3px 8px;
+  background: rgba(255, 251, 244, 0.97);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.34);
+  backdrop-filter: blur(18px);
 }
 
-.quick-x {
-  border: none;
-  background: var(--surface-2);
-  color: var(--text-dim);
-  width: 27px;
-  height: 27px;
-  border-radius: 50%;
-  cursor: pointer;
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
+/* 回复时把胶囊拉长成一条输入框，仍然保持椭圆 */
+.quick-pill.reply {
+  width: min(380px, calc(100vw - 24px));
+  padding-left: 12px;
 }
 
-.quick-text {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.5;
-  color: var(--text);
-  max-height: 3em;
-  overflow: hidden;
-}
-
-.quick-input-row {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.quickbar input {
+.quick-pill input {
   flex: 1;
   min-width: 0;
-  background: var(--surface-2);
-  border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 9px 13px;
-  color: var(--text);
-  font-size: 13.5px;
+  padding: 4px 2px;
+  border: none;
+  background: transparent;
+  color: #201d19;
+  font-size: 13px;
   outline: none;
 }
 
-.quickbar input:focus {
-  background: var(--surface);
-  border-color: rgba(217, 119, 87, 0.5);
-  box-shadow: 0 0 0 3px var(--accent-soft);
+.quick-pill input::placeholder {
+  color: rgba(32, 29, 25, 0.45);
 }
 
-.quick-preview {
-  margin: 0;
-  font-size: 10.5px;
-  color: var(--gold);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.quick-x {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: rgba(32, 29, 25, 0.45);
+  cursor: pointer;
+}
+
+.quick-x:hover {
+  background: rgba(32, 29, 25, 0.08);
+  color: #201d19;
 }
 
 .quick-hint {
   margin: 0;
-  font-size: 11px;
-  color: var(--danger);
-}
-
-.quick-actions {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.quick-count {
-  flex: 1;
-  font-size: 10px;
-  color: var(--text-faint);
+  max-width: 100%;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: rgba(88, 38, 33, 0.94);
+  color: #ffe9e2;
+  font-size: 10.5px;
+  line-height: 1.4;
 }
 
 .qbtn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: 3px;
+  height: 30px;
+  padding: 0 10px;
   border: none;
   border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--text);
-  padding: 8px 15px;
-  font-size: 12.5px;
-  font-weight: 550;
+  background: transparent;
+  color: #201d19;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
+}
+
+.qbtn:hover {
+  background: rgba(32, 29, 25, 0.07);
 }
 
 .qbtn.plus {
   background: var(--accent);
   color: var(--on-accent);
-  box-shadow: 0 6px 16px rgba(217, 119, 87, 0.22);
+  box-shadow: 0 4px 12px rgba(217, 119, 87, 0.24);
 }
 
-.qbtn.dim {
-  background: transparent;
-  color: var(--text-dim);
+.qbtn.plus:hover {
+  background: var(--accent);
+  filter: brightness(1.05);
 }
 
 .qbtn.send-mini {
-  width: 38px;
-  height: 38px;
-  padding: 0;
-  background: var(--accent);
-  color: #fff;
   flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 50%;
 }
 
 .qbtn:disabled {
