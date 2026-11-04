@@ -108,7 +108,8 @@ jobs:
 
   release:
     if: github.ref == 'refs/heads/main'
-    needs: build
+    # Pages 部署成功后才发 Release，避免 release 指向上线失败的构建
+    needs: [build, deploy]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
