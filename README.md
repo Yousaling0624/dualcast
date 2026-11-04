@@ -88,6 +88,14 @@ Cloudflare 备用站点 `https://sanlu.yousaling.dpdns.org` 仍然保留。
 sanlu-pwa/     Vue 3 + Vite PWA（网页版）
 DualLive/      Android 原生版
 .github/       GitHub Pages 自动部署工作流
+AGENTS.md      开发规范（所有 Agent 的单一事实来源）
+LESSONS.md     项目经验与踩过的坑
 ```
+
+## 参与开发
+
+仓库根目录的 [AGENTS.md](./AGENTS.md) 是唯一的开发规范，涵盖改动范围、代码约定、测试要求、提交信息格式和自动部署/发版流程；新踩的坑记录在 [LESSONS.md](./LESSONS.md)。
+
+Claude Code、Codex、Cursor 等直接读取 `AGENTS.md`；`CLAUDE.md`、`GEMINI.md`、`.github/copilot-instructions.md` 是各工具的入口文件。AI Agent 完成改动并通过验证后，会按规范自动提交、推送 `main`，由 CI 完成构建、部署和发版。
 
 详细技术说明见 [sanlu-pwa/README.md](./sanlu-pwa/README.md)。
