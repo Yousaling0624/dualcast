@@ -87,14 +87,14 @@ Release notes 直接从 commit 生成，所以 commit 就是发布说明：
 - TypeScript strict；不要引入 `any` 污染自有数据结构。外部 API 响应在边界处接收后，立即用 `lib/` 里的 normalize 函数转成内部类型。
 - 2 空格缩进、单引号、不加分号、尾逗号 —— 跟随现有代码，不引入新的 formatter 配置。
 - 注释用中文，解释「为什么」而不是复述代码；模块顶部保留用途说明。
-- 不引入新的运行时依赖 / UI 框架 / CSS 框架，除非确有必要并在提交说明里解释。
+- 不引入新的运行时依赖 / UI 框架 / CSS 框架；确有必要时先按第 2 节征求用户同意。
 - 不手动改 `package-lock.json`、`dist/`、`node_modules/`。
 
 ### 目录职责
 
 - `src/components/`：Vue 单文件组件，`<script setup lang="ts">` + Composition API。
 - `src/lib/`：网络、解析、播放器、弹幕、状态等非 UI 逻辑。纯函数放这里，便于单测。
-- `src/lib/store.ts`：全局状态与会话编排；共享状态通过 store 导出的方法修改，组件只保留本地 UI 状态。
+- `src/lib/store.ts`：全局状态与会话编排；优先通过 store 导出的方法修改共享状态，组件只保留本地 UI 状态（少量表单输入可直接绑定）。
 - `src/styles.css`：全局主题变量和基础样式；组件样式写在 SFC 的 `<style scoped>`。
 - `tests/*.test.ts`：Vitest 单测，只测纯逻辑，不发真实网络请求。
 
