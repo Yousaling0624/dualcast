@@ -7,6 +7,7 @@ import {
   exitSession,
   isPlayable,
   resolvePreview,
+  resolveSlot,
   startCombo,
   startSession,
   store,
@@ -14,12 +15,15 @@ import {
   useRecent,
 } from '../lib/store'
 import type { Combo, SlotState } from '../lib/store'
+import type { FollowedLiveRoom } from '../lib/followed'
 import { formatCount } from '../lib/bili'
 import { netStatus } from '../lib/net'
 import SettingsDrawer from './SettingsDrawer.vue'
+import FollowPicker from './FollowPicker.vue'
 import AppIcon from './AppIcon.vue'
 
 const drawer = ref<InstanceType<typeof SettingsDrawer> | null>(null)
+const followPicker = ref<InstanceType<typeof FollowPicker> | null>(null)
 const installEvent = ref<any>(null)
 const showInstall = ref(false)
 
@@ -92,6 +96,20 @@ function onCombo(c: Combo) {
   void startCombo(c)
 }
 
+function openFollow(key: 'a' | 'b') {
+  followPicker.value?.open(key)
+}
+
+async function onFollowPick(room: FollowedLiveRoom, key: 'a' | 'b') {
+  const slot = key === 'a' ? store.a : store.b
+  slot.input = String(room.roomId)
+  await resolveSlot(key)
+}
+
+function onFollowLogin() {
+  openSettings('account')
+}
+
 function install() {
   const e = installEvent.value
   if (!e) return
@@ -130,7 +148,7 @@ onBeforeUnmount(() => {
         <div class="brand-text">
           <div class="brand-line">
             <h1>叠播</h1>
-            <span class="ver">v1.9.0</span>
+            <span class="ver">v1.12.0</span>
           </div>
           <p>DualCast · 两个直播间一起看</p>
         </div>
@@ -270,6 +288,19 @@ onBeforeUnmount(() => {
               </button>
             </div>
 
+            <div class="follow-row">
+              <button
+                class="follow-btn"
+                :class="room.tone"
+                :title="store.loggedIn ? '从关注的主播里挑一个' : '登录后可读取关注列表'"
+                @click="openFollow(room.key)"
+              >
+                <AppIcon name="star" :size="13" />
+                从关注中选
+              </button>
+              <span v-if="!store.loggedIn" class="follow-hint">登录后可读取关注</span>
+            </div>
+
             <Transition name="preview">
               <div v-if="room.slot.state === 'ready'" class="preview">
                 <div class="cover">
@@ -377,6 +408,7 @@ onBeforeUnmount(() => {
     </Transition>
 
     <SettingsDrawer ref="drawer" />
+    <FollowPicker ref="followPicker" @pick="onFollowPick" @login="onFollowLogin" />
   </div>
 </template>
 
@@ -1159,6 +1191,47 @@ onBeforeUnmount(() => {
 .detect-btn:disabled {
   opacity: 0.55;
   cursor: progress;
+}
+
+.follow-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 7px;
+}
+
+.follow-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease;
+}
+
+.follow-btn:hover {
+  color: var(--accent-strong);
+  border-color: rgba(217, 119, 87, 0.36);
+  background: var(--accent-soft);
+}
+
+.follow-btn.peri:hover {
+  color: var(--accent-2);
+  border-color: rgba(102, 121, 207, 0.36);
+  background: var(--accent-2-soft);
+}
+
+.follow-hint {
+  color: var(--text-faint);
+  font-size: 10px;
 }
 
 .preview {

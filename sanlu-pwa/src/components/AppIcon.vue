@@ -36,6 +36,7 @@ type IconName =
   | 'flag'
   | 'block'
   | 'commentary'
+  | 'star'
   | 'more'
 
 const props = withDefaults(
@@ -113,6 +114,9 @@ const paths: Record<IconName, string[]> = {
   ],
   commentary: [
     'M21 3H3a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H3V5h18v14zM6 8h8v1.6H6zm0 3.7h12v1.6H6zm0 3.7h9v1.6H6z',
+  ],
+  star: [
+    'M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z',
   ],
   more: ['M6 10a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm6 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4z'],
 }

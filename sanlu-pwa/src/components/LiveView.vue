@@ -46,6 +46,7 @@ import {
 import DanmakuCanvas from './DanmakuCanvas.vue'
 import ChatPanel from './ChatPanel.vue'
 import SettingsDrawer from './SettingsDrawer.vue'
+import FollowPicker from './FollowPicker.vue'
 import AppIcon from './AppIcon.vue'
 import MultiWall from './MultiWall.vue'
 import SuperChatOverlay from './SuperChatOverlay.vue'
@@ -56,6 +57,7 @@ const videoBEl = ref<HTMLVideoElement | null>(null)
 const dmCanvas = ref<InstanceType<typeof DanmakuCanvas> | null>(null)
 const chatPanel = ref<InstanceType<typeof ChatPanel> | null>(null)
 const drawer = ref<InstanceType<typeof SettingsDrawer> | null>(null)
+const followPicker = ref<InstanceType<typeof FollowPicker> | null>(null)
 const quickInput = ref<HTMLInputElement | null>(null)
 
 const controls = ref(true)
@@ -974,6 +976,11 @@ async function quickAddSource() {
   reveal()
 }
 
+function openFollowPicker() {
+  followPicker.value?.open('multi')
+  reveal()
+}
+
 function multiBadge(s: ExtraRoom): string {
   return badgePreviewText(s.badgeMode, {
     uname: s.uname,
@@ -1191,6 +1198,13 @@ onBeforeUnmount(() => {
               placeholder="房间号或直播间链接"
               @keydown.enter="quickAddSource"
             />
+            <button
+              class="mp-follow"
+              title="从关注的主播里选正在直播的"
+              @click="openFollowPicker"
+            >
+              <AppIcon name="star" :size="15" />
+            </button>
             <button
               class="mp-add"
               :disabled="store.sourceBusy || !multiInput.trim()"
@@ -1666,7 +1680,7 @@ onBeforeUnmount(() => {
       ref="chatPanel"
       @collapse="chatCollapsed = true"
       @login="openSettings('account')"
-      @import="openSettings('danmaku')"
+      @import="openSettings('multi')"
     />
     <div v-else class="chat-fab-row">
       <button class="chat-fab" @click="chatCollapsed = false">
@@ -1676,6 +1690,11 @@ onBeforeUnmount(() => {
     </div>
 
     <SettingsDrawer ref="drawer" :fullscreen-el="isFullscreen ? zoneEl : null" />
+    <FollowPicker
+      ref="followPicker"
+      :fullscreen-el="isFullscreen ? zoneEl : null"
+      @login="openSettings('account')"
+    />
   </div>
 </template>
 
@@ -2374,6 +2393,24 @@ onBeforeUnmount(() => {
 
 .mp-add:disabled {
   opacity: 0.45;
+}
+
+.mp-follow {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 248, 239, 0.82);
+  cursor: pointer;
+}
+
+.mp-follow:hover {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff8ef;
 }
 
 .mp-err {

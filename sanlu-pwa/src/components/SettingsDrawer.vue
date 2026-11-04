@@ -34,6 +34,7 @@ import {
   setRelayBase,
 } from '../lib/net'
 import AppIcon from './AppIcon.vue'
+import FollowPicker from './FollowPicker.vue'
 
 type Tab = 'account' | 'danmaku' | 'multi' | 'mix' | 'video' | 'relay' | 'about'
 
@@ -49,6 +50,7 @@ const TABS = [
 
 const visible = ref(false)
 const tab = ref<Tab>('account')
+const followPicker = ref<InstanceType<typeof FollowPicker> | null>(null)
 
 const qrCanvas = ref<HTMLCanvasElement | null>(null)
 const qrState = ref<'idle' | 'loading' | 'waiting' | 'scanned' | 'ok' | 'expired' | 'error'>('idle')
@@ -261,6 +263,14 @@ async function importSource() {
   if (store.sourceBusy || !sourceInput.value.trim()) return
   const source = await addSource(sourceInput.value)
   if (source) sourceInput.value = ''
+}
+
+function openFollowPicker() {
+  followPicker.value?.open('multi')
+}
+
+function onFollowLogin() {
+  tab.value = 'account'
 }
 
 function sourceStatus(s: ExtraRoom): string {
@@ -727,6 +737,11 @@ defineOptions({ name: 'SettingsDrawer' })
                 </div>
                 <p v-if="store.sourceError" class="err-text">{{ store.sourceError }}</p>
 
+                <button class="btn-outline wide source-follow-btn" @click="openFollowPicker">
+                  <AppIcon name="star" :size="15" />
+                  从关注的主播里选正在直播的
+                </button>
+
                 <div v-for="s in store.sources" :key="s.id" class="source-card">
                   <div class="source-head">
                     <span class="source-badge" :style="{ background: s.color }">
@@ -1114,7 +1129,7 @@ defineOptions({ name: 'SettingsDrawer' })
                 <div class="about-logo">叠</div>
                 <div>
                   <h3>叠播 DualCast</h3>
-                  <p>v1.9.0 · PWA 网页版</p>
+                  <p>v1.12.0 · PWA 网页版</p>
                 </div>
               </div>
               <p class="dim">
@@ -1153,6 +1168,11 @@ defineOptions({ name: 'SettingsDrawer' })
         </div>
       </div>
     </Transition>
+    <FollowPicker
+      ref="followPicker"
+      :fullscreen-el="props.fullscreenEl"
+      @login="onFollowLogin"
+    />
   </Teleport>
 </template>
 
@@ -1563,6 +1583,19 @@ input[type='range'] {
 .source-import .btn-outline {
   flex: 0 0 auto;
   padding: 9px 15px;
+}
+
+.source-follow-btn {
+  margin: 7px 0 3px;
+  padding: 9px 15px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.source-follow-btn:hover {
+  color: var(--accent-strong);
+  border-color: rgba(217, 119, 87, 0.32);
+  background: var(--accent-soft);
 }
 
 .source-card {

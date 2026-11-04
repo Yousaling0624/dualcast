@@ -17,7 +17,15 @@ import {
   requestJson,
   saveCookieString,
 } from './net'
+import {
+  followedLiveFromFollowing,
+  followedLiveFromWebList,
+  mergeFollowedRooms,
+  type FollowedLiveRoom,
+} from './followed'
 import { clearWbiCache, signParams } from './wbi'
+
+export type { FollowedLiveRoom } from './followed'
 
 const QN_DESC: Record<number, string> = {
   30000: '杜比',
@@ -213,6 +221,97 @@ export async function fetchRoomInfo(roomId: number): Promise<RoomInfo> {
 
   roomCache.set(roomId, { at: Date.now(), info })
   return info
+}
+
+/* ---------- 关注列表 ---------- */
+
+const FOLLOW_TTL = 45_000
+let followCache: { at: number; list: FollowedLiveRoom[] } | null = null
+
+export function clearFollowCache() {
+  followCache = null
+}
+
+/**
+ * 关注的正在直播的主播。
+ * 优先用 PC 端开播列表（一次拿全）；被风控或字段不可解析时，
+ * 回退到分页的关注列表接口，逐页筛 live_status。
+ */
+export async function fetchFollowedLive(force = false): Promise<FollowedLiveRoom[]> {
+  if (!hasCookie()) throw new ApiError(-101, '登录 B 站账号后才能读取关注列表')
+  if (!force && followCache && Date.now() - followCache.at < FOLLOW_TTL) {
+    return followCache.list
+  }
+
+  const live = await fetchFollowedFromWebList()
+  if (live !== null) {
+    followCache = { at: Date.now(), list: live }
+    return live
+  }
+
+  const list = await fetchFollowedFromFollowing()
+  followCache = { at: Date.now(), list }
+  return list
+}
+
+/** 返回 null 表示这个接口不可用，调用方应回退；空数组表示确实没人开播 */
+async function fetchFollowedFromWebList(): Promise<FollowedLiveRoom[] | null> {
+  try {
+    const r = await requestJson(
+      'live',
+      'xlive/web-ucenter/v1/xfetter/GetWebList?hit_ab=true'
+    )
+    if (Number(r?.code) === -101) {
+      throw new ApiError(-101, '登录状态过期了，在设置里重新登录')
+    }
+    if (Number(r?.code) !== 0) return null
+    const rawCount = Array.isArray(r.data?.rooms)
+      ? r.data.rooms.length
+      : Array.isArray(r.data?.list)
+        ? r.data.list.length
+        : 0
+    const rooms = followedLiveFromWebList(r.data)
+    // 接口说有直播，但 hit_ab 把房间号等字段清零了：回退到分页接口
+    if (rawCount > 0 && rooms.length === 0) return null
+    return rooms
+  } catch (e) {
+    if (e instanceof ApiError && e.code === -101) throw e
+    return null
+  }
+}
+
+async function fetchFollowedFromFollowing(): Promise<FollowedLiveRoom[]> {
+  const url = (page: number) =>
+    `xlive/web-ucenter/user/following?page=${page}&page_size=30&ignoreRecord=1&hit_ab=true`
+
+  const first = await requestJson('live', url(1))
+  if (Number(first?.code) === -101) {
+    throw new ApiError(-101, '登录状态过期了，在设置里重新登录')
+  }
+  if (Number(first?.code) !== 0) {
+    throw new ApiError(
+      Number(first?.code) || -1,
+      first?.message || first?.msg || '读取关注列表失败'
+    )
+  }
+
+  let list = followedLiveFromFollowing(first.data)
+  const totalPage = Number(first.data?.totalPage || first.data?.total_page || 1)
+  // 最多补查 12 页（约 360 个关注），避免关注很多时打爆接口
+  const pages = Math.min(12, Math.max(1, totalPage))
+  if (pages > 1) {
+    const rest = await Promise.all(
+      Array.from({ length: pages - 1 }, (_, i) =>
+        requestJson('live', url(i + 2)).catch(() => null)
+      )
+    )
+    for (const r of rest) {
+      if (Number(r?.code) === 0) {
+        list = mergeFollowedRooms([...list, ...followedLiveFromFollowing(r.data)])
+      }
+    }
+  }
+  return list
 }
 
 /* ---------- 播放地址 ---------- */

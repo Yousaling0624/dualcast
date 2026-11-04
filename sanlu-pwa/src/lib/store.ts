@@ -14,6 +14,7 @@ import { DanmakuClient, type ChatMsg, type DanmakuStatus } from './danmaku'
 import { StreamPlayer, type StreamSet } from './player'
 import {
   biliLogout,
+  clearFollowCache,
   fetchAccount,
   fetchBuvid,
   fetchDanmakuHistory,
@@ -1575,7 +1576,15 @@ export function setCommentary(on: boolean) {
 
 /* ---------- 多路弹幕 / 解说 ---------- */
 
-export async function addSource(input: string): Promise<ExtraRoom | null> {
+export interface AddSourceOptions {
+  commentary?: boolean
+  video?: boolean
+}
+
+export async function addSource(
+  input: string,
+  initial: AddSourceOptions = {}
+): Promise<ExtraRoom | null> {
   if (store.sourceBusy) return null
   const value = input.trim()
   if (!value) {
@@ -1616,8 +1625,8 @@ export async function addSource(input: string): Promise<ExtraRoom | null> {
       badgeMode: uname ? 'initial' : 'color',
       badgeText: '',
       color: roomColor(init.roomId),
-      commentary: false,
-      video: false,
+      commentary: !!initial.commentary,
+      video: !!initial.video,
       volume: 0.6,
       status: 'idle',
       error: '',
@@ -1627,7 +1636,11 @@ export async function addSource(input: string): Promise<ExtraRoom | null> {
     }
     store.sources.push(source)
     persistSources()
-    if (store.view === 'live') connectSource(source)
+    if (store.view === 'live') {
+      connectSource(source)
+      // 从关注列表直接加入多路时，弹幕和画面一起就绪
+      if (source.commentary || source.video) syncSourcePlayer(source)
+    }
     return source
   } catch (e) {
     store.sourceError = e instanceof Error ? e.message : String(e)
@@ -1808,6 +1821,7 @@ export function clearSendError() {
 
 export async function finishLogin(cookieStr: string) {
   saveCookieString(cookieStr)
+  clearFollowCache()
   const [account] = await Promise.all([fetchAccount(), fetchBuvid()])
   store.account = account || {
     mid: Number(getCookieValue('DedeUserID') || 0),
@@ -1823,6 +1837,7 @@ export async function finishLogin(cookieStr: string) {
 export async function logout() {
   await biliLogout()
   localStorage.removeItem('dc_cookies')
+  clearFollowCache()
   store.loggedIn = false
   store.account = { mid: 0, name: '', avatar: '', level: 0 }
   writeJson('dc_account', store.account)
