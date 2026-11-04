@@ -30,9 +30,9 @@ if ! git rev-parse "${range%%..*}" >/dev/null 2>&1; then
   range="HEAD"
 fi
 
-count="$(git log "$range" --no-merges --pretty=format:'%H' | wc -l | tr -d ' ')"
+count="$(git rev-list --count --no-merges "$range")"
 strip_prefix() {
-  sed -E 's/^PWA [^：:]*[：:] ?//'
+  sed -E 's/^PWA[[:space:]]*[^：:]*[：:][[:space:]]?//'
 }
 
 {
@@ -57,7 +57,8 @@ strip_prefix() {
     fix=()
     tune=()
     other=()
-    while IFS= read -r subject; do
+    # git log --pretty 不会在最后一条后换行，read 需要兼容这种 EOF
+    while IFS= read -r subject || [ -n "$subject" ]; do
       [ -n "$subject" ] || continue
       case "$subject" in
         *新增* | *添加* | *支持* | *上线* | feat* | Feat* | *feature*) feat+=("- $subject") ;;

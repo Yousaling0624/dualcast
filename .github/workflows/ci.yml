@@ -24,6 +24,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Check release script syntax
+        run: bash -n .github/scripts/release-notes.sh
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
