@@ -178,6 +178,8 @@ export type SendState = {
 
 const LIMIT = 20
 const MAX_MESSAGES = 300
+/** 弹幕画布暂停 / 掉帧时的积压上限，避免回到前台后一次处理上千条 */
+const MAX_FEED_BUFFER = 260
 const SEND_COOLDOWN = 1500
 const SELF_ECHO_WINDOW = 8000
 const NAME_LIMIT = 12
@@ -419,6 +421,8 @@ export const store = reactive({
   a: emptySlot(),
   b: emptySlot(),
   messages: [] as ChatMsg[],
+  /** 消息列表版本号：增删消息时 +1，聊天室据此节流刷新，避免逐条重渲染长列表 */
+  messageRev: 0,
   /** 新 SC 的独立队列，画面上的 SC 悬浮窗消费它，不依赖聊天室滚动位置 */
   scFeed: [] as ChatMsg[],
   viewer: 0,
@@ -534,6 +538,11 @@ function trimMessages() {
   }
 }
 
+/** 消息列表有增删时调用，聊天室按版本号做节流刷新 */
+function touchMessages() {
+  store.messageRev++
+}
+
 function consumeSelfEcho(text: string, roomId?: number): boolean {
   const now = Date.now()
   while (pendingSelfEcho.length && pendingSelfEcho[0].until < now) pendingSelfEcho.shift()
@@ -623,6 +632,7 @@ export function blockUser(m: UserRef): boolean {
   if (store.settings.danmaku.blockedUsers.some((u) => sameBlockedUser(ref, u))) return false
   store.settings.danmaku.blockedUsers.push(user)
   store.messages = store.messages.filter((x) => !sameBlockedUser(x, user))
+  touchMessages()
   store.scFeed = store.scFeed.filter((x) => !sameBlockedUser(x, user))
   for (let i = feedBuffer.length - 1; i >= 0; i--) {
     if (sameBlockedUser(feedBuffer[i], user)) feedBuffer.splice(i, 1)
@@ -668,12 +678,16 @@ function pushMessage(m: ChatMsg) {
   store.messages.push(msg)
   if (!msg.history) {
     feedBuffer.push(msg)
+    if (feedBuffer.length > MAX_FEED_BUFFER) {
+      feedBuffer.splice(0, feedBuffer.length - MAX_FEED_BUFFER)
+    }
     if (msg.kind === 'sc') {
       store.scFeed.push(msg)
       if (store.scFeed.length > 40) store.scFeed.splice(0, store.scFeed.length - 40)
     }
   }
   trimMessages()
+  touchMessages()
 }
 
 function insertHistory(sourceId: string, list: ChatMsg[]) {
@@ -695,6 +709,7 @@ function insertHistory(sourceId: string, list: ChatMsg[]) {
   if (!fresh.length) return
   store.messages.unshift(...fresh)
   trimMessages()
+  touchMessages()
 }
 
 /* ---------- 视频 ---------- */
@@ -954,6 +969,7 @@ function beginSession() {
   store.a.blocked = false
   store.b.blocked = false
   store.messages = []
+  touchMessages()
   store.scFeed = []
   feedBuffer.length = 0
   applyRoomProfile()
@@ -977,6 +993,7 @@ function beginSession() {
 function connectDanmaku() {
   danmaku.stop()
   store.messages = []
+  touchMessages()
   store.scFeed = []
   feedBuffer.length = 0
   store.danmakuStatus = 'connecting'
@@ -1061,6 +1078,7 @@ function connectBDanmaku() {
 /** 从聊天室、SC 队列和待绘制队列里清掉某个来源的消息 */
 function purgeSourceMessages(sourceId: string) {
   store.messages = store.messages.filter((m) => m.sourceId !== sourceId)
+  touchMessages()
   store.scFeed = store.scFeed.filter((m) => m.sourceId !== sourceId)
   for (let i = feedBuffer.length - 1; i >= 0; i--) {
     if (feedBuffer[i].sourceId === sourceId) feedBuffer.splice(i, 1)
@@ -1466,6 +1484,7 @@ export function exitSession() {
   store.bDanmakuStatus = 'idle'
   store.bDanmakuError = ''
   feedBuffer.length = 0
+  touchMessages()
   releaseWakeLock()
   try {
     if ('mediaSession' in navigator) {

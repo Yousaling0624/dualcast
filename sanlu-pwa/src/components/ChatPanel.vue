@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import {
   blockUser,
   buildReply,
@@ -30,6 +30,39 @@ let clock: number | null = null
 let handledSeq = store.sendState.sentSeq
 
 const LIMIT = 20
+
+/**
+ * 聊天室列表按 ~10fps 批量刷新。弹幕高峰时逐条重渲染 300 行会和画面上的
+ * 弹幕动画抢主线程；消息仍实时进 store.messages，这里只降低落 DOM 的频率。
+ */
+const rows = shallowRef<ChatMsg[]>([])
+let syncTimer: number | null = null
+
+function syncRows() {
+  if (syncTimer !== null) {
+    clearTimeout(syncTimer)
+    syncTimer = null
+  }
+  rows.value = store.messages.slice()
+}
+
+function scheduleSync() {
+  if (!store.messages.length) {
+    if (syncTimer !== null) {
+      clearTimeout(syncTimer)
+      syncTimer = null
+    }
+    if (rows.value.length) rows.value = []
+    return
+  }
+  if (syncTimer !== null) return
+  // 首屏立即出，之后把这段时间的新弹幕合并成一次刷新
+  if (!rows.value.length) {
+    syncRows()
+    return
+  }
+  syncTimer = window.setTimeout(syncRows, 100)
+}
 
 const statusLabel = computed(() => {
   const s = store.danmakuStatus
@@ -175,7 +208,8 @@ function jumpToBottom() {
 }
 
 watch(
-  () => store.messages.length,
+  // 用最后一条的 seq 而不是列表长度：满 300 条后长度不变，长度 watch 会失效
+  () => rows.value[rows.value.length - 1]?.seq,
   async () => {
     if (!atBottom.value) return
     await nextTick()
@@ -183,6 +217,8 @@ watch(
     if (el) el.scrollTop = el.scrollHeight
   }
 )
+
+watch(() => store.messageRev, scheduleSync)
 
 watch(
   () => store.a.roomId,
@@ -224,11 +260,13 @@ watch(input, () => {
 
 onMounted(() => {
   clock = window.setInterval(() => (now.value = Date.now()), 500)
+  syncRows()
   // 从全屏/收起状态重新打开时，直接落到最新一条
   void nextTick(jumpToBottom)
 })
 onBeforeUnmount(() => {
   if (clock) clearInterval(clock)
+  if (syncTimer !== null) clearTimeout(syncTimer)
 })
 
 defineExpose({ focus: () => focusInput.value?.focus() })
@@ -277,7 +315,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
     </header>
 
     <div ref="listEl" class="list scroll-y" @scroll="onScroll">
-      <div v-if="!store.messages.length" class="empty">
+      <div v-if="!rows.length" class="empty">
         <span class="empty-icon"><AppIcon name="chat" :size="22" /></span>
         <strong>{{ store.danmakuStatus === 'open' ? '还很安静' : '正在连接弹幕…' }}</strong>
         <small>
@@ -289,7 +327,7 @@ defineExpose({ focus: () => focusInput.value?.focus() })
         </small>
       </div>
 
-      <template v-for="m in store.messages" :key="m.seq">
+      <template v-for="m in rows" :key="m.seq">
         <div v-if="m.kind === 'sys'" class="sys-row">
           <span>{{ m.text }}</span>
         </div>

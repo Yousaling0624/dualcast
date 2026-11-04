@@ -5,6 +5,25 @@ import type { ChatMsg } from '../lib/danmaku'
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 
+/**
+ * 预渲染好的弹幕贴图。
+ *
+ * 弹幕每帧都在移动，如果每帧都 fillText / strokeText + 设置字体，
+ * 弹幕多的时候主线程会被文字排版吃掉，表现出来就是掉帧。
+ * 这里在弹幕创建时把「气泡 + 文字 + 描边 / 阴影」烘焙成一张小位图，
+ * 之后每帧只做 drawImage。相同文字复用同一张图（密集房间大量 666）。
+ */
+interface Sprite {
+  canvas: HTMLCanvasElement
+  /** 正文 + 气泡的宽度，用于移动和点击命中 */
+  w: number
+  /** 贴图画布尺寸与相对 it.x / it.top 的偏移（含描边 / 阴影留白） */
+  sw: number
+  sh: number
+  sx: number
+  sy: number
+}
+
 interface Item {
   msg: ChatMsg
   text: string
@@ -19,10 +38,10 @@ interface Item {
   /** 多路弹幕的来源气泡 */
   badge: string
   badgeColor: string
-  badgeW: number
-  badgeFont: number
+  showBadge: boolean
   /** 鼠标悬停 / 点击后冻结，不再飘动 */
   frozen: boolean
+  sprite: Sprite | null
 }
 
 interface DmHit {
@@ -35,15 +54,30 @@ interface DmHit {
 }
 
 const items: Item[] = []
+const spriteCache = new Map<string, Sprite>()
+/** 缓存上限：密集弹幕下大量重复文本能命中，又不至于把内存堆满 */
+const SPRITE_CACHE_MAX = 64
+
 let raf = 0
+let running = false
 let ctx: CanvasRenderingContext2D | null = null
 let laneH = 24
 let ro: ResizeObserver | null = null
 let lastTick = 0
 let lastWidth = 0
+/** 画布的 CSS 尺寸，避免每帧读 clientWidth / clientHeight 触发布局查询 */
+let cssW = 0
+let cssH = 0
+/** 当前设备像素比，贴图绘制时对齐设备像素，避免文字被插值糊掉 */
+let pxRatio = 1
 let frozenSeq = 0
 /** 正文字心到基线的距离，layout 时按实际字体量一次，气泡靠它对齐 */
 let inkOffset = 18 * 0.35
+/** 字号 / 描边 / DPR 变化时标记贴图过期，下一帧统一重建 */
+let spritesDirty = false
+let lastPaintSig = ''
+/** 只用来量文字尺寸，和主画布状态隔离 */
+let measureCtx: CanvasRenderingContext2D | null = null
 
 function fontCss(scale: number, bold: boolean) {
   return `${bold ? '600 ' : ''}${Math.round(18 * scale)}px 'PingFang SC', 'HarmonyOS Sans SC', 'Microsoft YaHei', sans-serif`
@@ -79,6 +113,16 @@ function showSourceBadges(): boolean {
   return shouldShowSourceBadges()
 }
 
+function measureContext(): CanvasRenderingContext2D | null {
+  if (!measureCtx) {
+    const el = document.createElement('canvas')
+    el.width = 1
+    el.height = 1
+    measureCtx = el.getContext('2d')
+  }
+  return measureCtx
+}
+
 /** 用实际字体的字形包围盒算字心，比按 em 估算更准，换字体也不跑偏 */
 function measureInkOffset(c: CanvasRenderingContext2D, scale: number, bold: boolean): number {
   c.font = fontCss(scale, bold)
@@ -96,34 +140,169 @@ function badgeWidth(c: CanvasRenderingContext2D, text: string, scale: number): n
   return Math.round(c.measureText(text).width + fs * 1.1)
 }
 
+function roundRect(
+  c: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  r: number
+) {
+  c.beginPath()
+  c.moveTo(x + r, y)
+  c.arcTo(x + w, y, x + w, y + h, r)
+  c.arcTo(x + w, y + h, x, y + h, r)
+  c.arcTo(x, y + h, x, y, r)
+  c.arcTo(x, y, x + w, y, r)
+  c.closePath()
+}
+
+/** 把一条弹幕画成位图；文字、气泡和描边都只排版这一次 */
+function renderSprite(it: Item): Sprite | null {
+  const d = store.settings.danmaku
+  const scale = d.fontScale
+  const m = measureContext()
+  if (!m) return null
+
+  m.font = fontCss(scale, d.bold)
+  const textW = m.measureText(it.text).width
+  const badgeW = it.showBadge ? badgeWidth(m, it.badge, scale) : 0
+  const contentW = textW + (badgeW ? badgeW + 5 : 0)
+  // 描边宽度 3 / 阴影 blur 4，留一点边距避免贴图把效果裁掉
+  const pad = it.sticky ? 3 : d.style === 'shadow' ? 8 : 3
+  const dpr = Math.min(window.devicePixelRatio || 1, 2)
+  const sw = Math.ceil(contentW + (it.sticky ? 16 : 0) + pad * 2)
+  const sh = Math.ceil(laneH + pad * 2)
+  const sprite = document.createElement('canvas')
+  sprite.width = Math.max(1, Math.round(sw * dpr))
+  sprite.height = Math.max(1, Math.round(sh * dpr))
+  const g = sprite.getContext('2d')
+  if (!g) return null
+  g.setTransform(dpr, 0, 0, dpr, 0, 0)
+
+  // sticky 的背景从 it.top - 2 开始，所以贴图里的基线要再下移 2
+  const baseline = pad + laneH * 0.78 + (it.sticky ? 2 : 0)
+  let textX = pad
+
+  if (it.sticky) {
+    g.fillStyle = 'rgba(0,0,0,0.55)'
+    roundRect(g, pad, pad, contentW + 16, laneH, 6)
+    g.fill()
+    textX = pad + 8
+  } else if (badgeW) {
+    const barH = badgeBarH(scale)
+    const centerY = pad + laneH * 0.78 - inkOffset
+    // 只有颜色没有字时缩成一个小圆点，有字时是细长椭圆
+    const bw = it.badge ? Math.max(badgeW, barH) : Math.round(barH * 0.62)
+    const bh = it.badge ? barH : bw
+    g.fillStyle = it.badgeColor || '#d97757'
+    roundRect(g, pad, centerY - bh / 2, bw, bh, bh / 2)
+    g.fill()
+    if (it.badge) {
+      g.fillStyle = '#ffffff'
+      g.font = badgeFontCss(scale)
+      // 气泡文字也按字形包围盒居中，别用 middle 留出字体的上下不对称空隙
+      const bm = g.measureText(it.badge)
+      const asc = bm.actualBoundingBoxAscent
+      const desc = bm.actualBoundingBoxDescent
+      const ty = Number.isFinite(asc) && asc > 0 ? centerY + (asc - desc) / 2 : centerY
+      g.textAlign = 'center'
+      g.fillText(it.badge, pad + bw / 2, ty)
+      g.textAlign = 'left'
+    }
+    textX = pad + badgeW + 5
+  }
+
+  g.font = fontCss(scale, d.bold)
+  if (!it.sticky) {
+    if (d.style === 'outline') {
+      g.lineWidth = 3
+      g.strokeStyle = 'rgba(0,0,0,0.85)'
+      g.strokeText(it.text, textX, baseline)
+    } else if (d.style === 'shadow') {
+      g.shadowColor = 'rgba(0,0,0,0.75)'
+      g.shadowBlur = 4
+      g.shadowOffsetY = 1
+    }
+  }
+  g.fillStyle = it.color
+  g.fillText(it.text, textX, baseline)
+
+  return {
+    canvas: sprite,
+    w: contentW,
+    sw,
+    sh,
+    // sticky 的背景比正文左右各宽 8 / 上宽 2，贴图偏移跟着补偿
+    sx: it.sticky ? -pad - 8 : -pad,
+    sy: it.sticky ? -pad - 2 : -pad,
+  }
+}
+
+function spriteFor(it: Item): Sprite | null {
+  const d = store.settings.danmaku
+  const dpr = Math.min(window.devicePixelRatio || 1, 2)
+  const key = [
+    it.sticky ? 's' : 'f',
+    Math.round(d.fontScale * 100),
+    d.bold ? 1 : 0,
+    d.style,
+    dpr,
+    it.color,
+    it.showBadge ? 1 : 0,
+    it.badge,
+    it.badgeColor,
+    it.text,
+  ].join('|')
+
+  const hit = spriteCache.get(key)
+  if (hit) {
+    // Map 的插入顺序当 LRU 用：命中后挪到队尾
+    spriteCache.delete(key)
+    spriteCache.set(key, hit)
+    return hit
+  }
+
+  const built = renderSprite(it)
+  if (built) {
+    spriteCache.set(key, built)
+    if (spriteCache.size > SPRITE_CACHE_MAX) {
+      const oldest = spriteCache.keys().next().value
+      if (oldest !== undefined) spriteCache.delete(oldest)
+    }
+  }
+  return built
+}
+
+function applySprite(it: Item) {
+  const sprite = spriteFor(it)
+  if (!sprite) return
+  it.sprite = sprite
+  it.w = sprite.w
+}
+
 function layout() {
   const el = canvas.value
   if (!el) return
   const dpr = Math.min(window.devicePixelRatio || 1, 2)
   const rect = el.getBoundingClientRect()
   if (!rect.width || !rect.height) return
-  el.width = Math.round(rect.width * dpr)
-  el.height = Math.round(rect.height * dpr)
+  cssW = rect.width
+  cssH = rect.height
+  pxRatio = dpr
+  el.width = Math.round(cssW * dpr)
+  el.height = Math.round(cssH * dpr)
   if (!ctx) ctx = el.getContext('2d')
   ctx?.setTransform(dpr, 0, 0, dpr, 0, 0)
 
   const d = store.settings.danmaku
   laneH = 20 * d.fontScale * 1.35
   if (ctx) inkOffset = measureInkOffset(ctx, d.fontScale, d.bold)
-  const widthChanged = lastWidth > 0 && Math.abs(rect.width - lastWidth) > 1
-  const ratio = widthChanged ? rect.width / lastWidth : 1
-  lastWidth = rect.width
+  const widthChanged = lastWidth > 0 && Math.abs(cssW - lastWidth) > 1
+  const ratio = widthChanged ? cssW / lastWidth : 1
+  lastWidth = cssW
   for (const it of items) {
-    if (ctx) {
-      ctx.font = fontCss(d.fontScale, d.bold)
-      it.w = ctx.measureText(it.text).width
-      if (it.badgeW) {
-        it.badgeW = badgeWidth(ctx, it.badge, d.fontScale)
-        it.badgeFont = badgeFontPx(d.fontScale)
-        it.w += it.badgeW + 5
-      }
-    }
-    it.top = it.lane * laneH + 2
+    it.top = it.lane * laneH + (it.sticky ? 4 : 2)
     // 画布尺寸变化（全屏 / 切画面）时按比例换算位置和速度：
     // 已经在飘的弹幕原地继续走，不会整屏回炉重来
     if (!it.sticky && !it.frozen && widthChanged) {
@@ -131,15 +310,24 @@ function layout() {
       it.speed *= ratio
     }
   }
+
+  // 字号 / 描边 / DPR 变了才重建贴图。拖设置里的滑块时可能一帧触发多次，
+  // 这里只打标记，由 tick 每帧统一处理一次。
+  const sig = `${d.fontScale}|${d.bold ? 1 : 0}|${d.style}|${dpr}`
+  if (sig !== lastPaintSig) {
+    lastPaintSig = sig
+    spritesDirty = true
+  }
 }
 
 function spawn() {
   const el = canvas.value
-  const c = ctx
-  if (!el || !c) return
+  if (!el || !ctx || cssW <= 0 || cssH <= 0) return
   const d = store.settings.danmaku
   const now = performance.now()
   const withBadges = showSourceBadges()
+  const maxLane = Math.max(1, Math.floor((cssH * d.area) / laneH))
+  const speed = (cssW / 9) * d.speed
   while (feedBuffer.length) {
     const m = feedBuffer.shift()!
     if (!d.enabled || !m.text || m.history) continue
@@ -152,46 +340,40 @@ function spawn() {
 
     const text =
       d.showName && m.uname && m.kind === 'danmu' ? `${m.uname}：${m.text}` : m.text
-    c.font = fontCss(d.fontScale, d.bold)
-    const textW = c.measureText(text).width
-    const showBadge = withBadges && m.kind === 'danmu' && !!m.sourceColor
-    const badge = showBadge ? m.badge || '' : ''
-    const badgeColor = showBadge ? m.sourceColor || '' : ''
-    const badgeW = showBadge ? badgeWidth(c, badge, d.fontScale) : 0
-    const w = textW + (badgeW ? badgeW + 5 : 0)
-    const color = colorOf(m)
     const sticky = m.kind === 'guard'
+    const showBadge = withBadges && m.kind === 'danmu' && !!m.sourceColor
+    const it: Item = {
+      msg: m,
+      text,
+      color: colorOf(m),
+      lane: 0,
+      x: 0,
+      w: 0,
+      top: 0,
+      speed: 0,
+      born: now,
+      sticky,
+      badge: showBadge ? m.badge || '' : '',
+      badgeColor: showBadge ? m.sourceColor || '' : '',
+      showBadge,
+      frozen: false,
+      sprite: null,
+    }
 
     if (sticky) {
       let lane = 0
       while (
-        items.some((it) => it.sticky && it.lane === lane && now - it.born < 4200) &&
+        items.some((x) => x.sticky && x.lane === lane && now - x.born < 4200) &&
         lane < 5
       ) {
         lane++
       }
-      items.push({
-        msg: m,
-        text,
-        color,
-        lane,
-        x: 0,
-        w,
-        top: lane * laneH + 4,
-        speed: 0,
-        born: now,
-        sticky: true,
-        badge: '',
-        badgeColor: '',
-        badgeW: 0,
-        badgeFont: badgeFontPx(d.fontScale),
-        frozen: false,
-      })
+      it.lane = lane
+      it.top = lane * laneH + 4
+      applySprite(it)
+      items.push(it)
     } else {
-      const maxLane = Math.max(1, Math.floor((el.clientHeight * d.area) / laneH))
       let lane = 0
-      const width = el.clientWidth
-      const speed = (width / 9) * d.speed
       let found = false
       for (let l = 0; l < maxLane; l++) {
         let last: Item | undefined
@@ -211,142 +393,100 @@ function spawn() {
         // last.x 已经在每帧里随速度左移，这里只需判断上一条的尾巴是否已让出
         // 屏幕右侧的出生位置；再减一次 elapsed * speed 会把移动量算两遍，
         // 导致一条轨道很久都腾不出来，弹幕看起来又稀又重叠。
-        if (last.x + last.w + 24 < width) {
+        if (last.x + last.w + 24 < cssW) {
           lane = l
           found = true
           break
         }
       }
       if (!found) lane = Math.floor(Math.random() * maxLane)
-      items.push({
-        msg: m,
-        text,
-        color,
-        lane,
-        x: width + 8,
-        w,
-        top: lane * laneH + 2,
-        speed,
-        born: now,
-        sticky: false,
-        badge,
-        badgeColor,
-        badgeW,
-        badgeFont: badgeFontPx(d.fontScale),
-        frozen: false,
-      })
+      it.lane = lane
+      it.x = cssW + 8
+      it.top = lane * laneH + 2
+      it.speed = speed
+      applySprite(it)
+      items.push(it)
     }
     if (items.length > 260) {
       const removed = items.splice(0, items.length - 260)
-      if (removed.some((it) => it.msg.seq === frozenSeq)) frozenSeq = 0
+      if (removed.some((x) => x.msg.seq === frozenSeq)) frozenSeq = 0
     }
-  }
-}
-
-function drawBadge(c: CanvasRenderingContext2D, it: Item, alpha: number) {
-  const scale = store.settings.danmaku.fontScale
-  const barH = badgeBarH(scale)
-  // 和正文的字心对齐：正文基线在 top + laneH * 0.78
-  const centerY = it.top + laneH * 0.78 - inkOffset
-  const x = it.x
-  // 只有颜色没有字时缩成一个小圆点，有字时是细长椭圆
-  const w = it.badge ? Math.max(it.badgeW, barH) : Math.round(barH * 0.62)
-  const h = it.badge ? barH : w
-  c.globalAlpha = Math.min(1, alpha + 0.06)
-  c.fillStyle = it.badgeColor || '#d97757'
-  roundRect(c, x, centerY - h / 2, w, h, h / 2)
-  c.fill()
-  if (it.badge) {
-    c.globalAlpha = alpha
-    c.fillStyle = '#ffffff'
-    c.font = badgeFontCss(scale)
-    // 气泡文字也按字形包围盒居中，别用 middle 留出字体的上下不对称空隙
-    const m = c.measureText(it.badge)
-    const asc = m.actualBoundingBoxAscent
-    const desc = m.actualBoundingBoxDescent
-    const ty = Number.isFinite(asc) && asc > 0 ? centerY + (asc - desc) / 2 : centerY
-    c.textAlign = 'center'
-    c.textBaseline = 'alphabetic'
-    c.fillText(it.badge, x + w / 2, ty)
-    c.textAlign = 'left'
-    // 画完气泡把字体恢复成正文字体，否则后面的弹幕文字会沿用气泡的小字号
-    c.font = fontCss(scale, store.settings.danmaku.bold)
   }
 }
 
 function drawItem(c: CanvasRenderingContext2D, it: Item, alpha: number) {
-  const d = store.settings.danmaku
-  const textX = it.x + (it.badgeW ? it.badgeW + 5 : 0)
-  c.globalAlpha = alpha
-  c.font = fontCss(d.fontScale, d.bold)
-  if (it.sticky) {
-    const x = (canvas.value!.clientWidth - it.w) / 2
-    it.x = x
-    c.fillStyle = 'rgba(0,0,0,0.55)'
-    roundRect(c, x - 8, it.top - 2, it.w + 16, laneH, 6)
-    c.fill()
-    c.fillStyle = it.color
-    c.fillText(it.text, x, it.top + laneH * 0.78)
-    return
-  }
+  if (it.sticky) it.x = (cssW - it.w) / 2
 
   if (it.frozen) {
     c.globalAlpha = Math.min(1, alpha + 0.1)
     c.fillStyle = 'rgba(20, 17, 14, 0.62)'
     roundRect(c, it.x - 6, it.top - 2, it.w + 12, laneH + 2, 7)
     c.fill()
-    c.globalAlpha = alpha
   }
 
-  if (it.badgeW) drawBadge(c, it, alpha)
+  const sprite = it.sprite
+  if (!sprite) return
+  c.globalAlpha = alpha
+  // 位置和尺寸都对齐设备像素：贴图与画布 1:1 映射，drawImage 不会做插值
+  const x = Math.round((it.x + sprite.sx) * pxRatio) / pxRatio
+  const y = Math.round((it.top + sprite.sy) * pxRatio) / pxRatio
+  const w = Math.round(sprite.sw * pxRatio) / pxRatio
+  const h = Math.round(sprite.sh * pxRatio) / pxRatio
+  c.drawImage(sprite.canvas, x, y, w, h)
+}
 
-  if (d.style === 'outline') {
-    c.lineWidth = 3
-    c.strokeStyle = 'rgba(0,0,0,0.85)'
-    c.strokeText(it.text, textX, it.top + laneH * 0.78)
-  } else if (d.style === 'shadow') {
-    c.shadowColor = 'rgba(0,0,0,0.75)'
-    c.shadowBlur = 4
-    c.shadowOffsetY = 1
-  }
-  c.fillStyle = it.color
-  c.fillText(it.text, textX, it.top + laneH * 0.78)
-  c.shadowBlur = 0
-  c.shadowOffsetY = 0
+function clearScene(c?: CanvasRenderingContext2D | null) {
+  items.length = 0
+  feedBuffer.length = 0
+  frozenSeq = 0
+  spritesDirty = false
+  if (c && cssW > 0 && cssH > 0) c.clearRect(0, 0, cssW, cssH)
+}
+
+function sleep() {
+  running = false
+  if (raf) cancelAnimationFrame(raf)
+  raf = 0
+}
+
+function wake() {
+  if (running) return
+  if (!canvas.value || store.view !== 'live' || !store.settings.danmaku.enabled) return
+  if (document.hidden) return
+  // 暂停期间积压的弹幕不再补播，避免回到前台时整屏井喷
+  feedBuffer.length = 0
+  lastTick = performance.now()
+  running = true
+  raf = requestAnimationFrame(tick)
 }
 
 function tick(now: number) {
+  if (!running) return
   const el = canvas.value
   const c = ctx
   if (!el || !c) {
-    raf = requestAnimationFrame(tick)
+    running = false
     return
   }
   const d = store.settings.danmaku
+
+  // 回主页 / 切后台 / 关弹幕时真正停下 RAF，别让空循环继续占主线程和电量
+  if (store.view !== 'live' || !d.enabled || document.hidden) {
+    clearScene(c)
+    sleep()
+    return
+  }
+
   const dt = Math.min((now - (lastTick || now)) / 1000, 0.1)
   lastTick = now
-  c.clearRect(0, 0, el.clientWidth, el.clientHeight)
 
-  // 回主页后播放器在后台：不画弹幕、丢弃积压，省一点 CPU / 电量
-  if (store.view !== 'live') {
-    feedBuffer.length = 0
-    items.length = 0
-    frozenSeq = 0
-    raf = requestAnimationFrame(tick)
-    return
+  if (spritesDirty) {
+    spritesDirty = false
+    for (const it of items) applySprite(it)
   }
-
-  if (!d.enabled) {
-    // 关闭弹幕时立刻清屏，并丢弃积压的弹幕，避免重新打开时井喷
-    feedBuffer.length = 0
-    items.length = 0
-    frozenSeq = 0
-    raf = requestAnimationFrame(tick)
-    return
-  }
-
   spawn()
-  c.globalAlpha = d.alpha
+
+  c.clearRect(0, 0, cssW, cssH)
 
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i]
@@ -369,23 +509,6 @@ function tick(now: number) {
     }
   }
   raf = requestAnimationFrame(tick)
-}
-
-function roundRect(
-  c: CanvasRenderingContext2D,
-  x: number,
-  y: number,
-  w: number,
-  h: number,
-  r: number
-) {
-  c.beginPath()
-  c.moveTo(x + r, y)
-  c.arcTo(x + w, y, x + w, y + h, r)
-  c.arcTo(x + w, y + h, x, y + h, r)
-  c.arcTo(x, y + h, x, y, r)
-  c.arcTo(x, y, x + w, y, r)
-  c.closePath()
 }
 
 function itemAt(x: number, y: number): Item | null {
@@ -461,6 +584,15 @@ function clear() {
 
 defineExpose({ hitTest, hitRect, freezeAt, freezeSeq, release, rectFor, clear })
 
+function onVisibilityChange() {
+  if (document.hidden) {
+    sleep()
+    clearScene(ctx)
+  } else {
+    wake()
+  }
+}
+
 onMounted(() => {
   const el = canvas.value!
   ctx = el.getContext('2d')
@@ -468,13 +600,26 @@ onMounted(() => {
   ro.observe(el)
   layout()
   lastTick = performance.now()
-  raf = requestAnimationFrame(tick)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  wake()
 })
 
 onBeforeUnmount(() => {
-  cancelAnimationFrame(raf)
+  sleep()
   ro?.disconnect()
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
+
+watch(
+  () => store.view,
+  (v) => {
+    if (v === 'live') wake()
+    else {
+      sleep()
+      clearScene(ctx)
+    }
+  }
+)
 
 watch(
   () => store.settings.danmaku,
@@ -486,6 +631,7 @@ watch(
       if (items[i].msg.seq === frozenSeq) frozenSeq = 0
       items.splice(i, 1)
     }
+    if (store.settings.danmaku.enabled) wake()
   },
   { deep: true }
 )
