@@ -15,6 +15,10 @@ local.properties
 *.aab
 *.iml
 
+# 发布产物
+dualcast-pwa-*.zip
+release-notes.md
+
 # 其他
 .DS_Store
 *.local

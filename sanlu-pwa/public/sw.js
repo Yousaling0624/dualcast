@@ -4,7 +4,8 @@
  * - /api 与 /stream 请求一律直连，绝不缓存；
  * - 所有路径相对 SW 作用域解析，兼容 GitHub Pages 的 /<repo>/ 子路径。
  */
-const CACHE = 'sanlu-shell-v22'
+// __BUILD_ID__ 在构建时替换成「版本 + commit」，每次发布都会换缓存名
+const CACHE = 'sanlu-shell-__BUILD_ID__'
 const SCOPE = new URL(self.registration.scope)
 const SCOPE_PATH = SCOPE.pathname
 const SHELL = [

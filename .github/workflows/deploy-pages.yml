@@ -1,4 +1,4 @@
-name: Deploy PWA to GitHub Pages
+name: Build, Release & Deploy PWA
 
 on:
   push:
@@ -6,20 +6,26 @@ on:
     paths:
       - 'sanlu-pwa/**'
       - '.github/workflows/deploy-pages.yml'
+      - '.github/scripts/**'
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+  actions: read
   pages: write
   id-token: write
 
+# 每次 push 都要发布，所以不能取消进行中的任务；按顺序排队执行
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: pwa-release
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build_id: ${{ steps.version.outputs.build_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,6 +36,13 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: sanlu-pwa/package-lock.json
+
+      - name: Resolve version
+        id: version
+        run: |
+          version="0.1.${GITHUB_RUN_NUMBER}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "build_id=${version}-${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Install dependencies
         working-directory: sanlu-pwa
@@ -50,6 +63,8 @@ jobs:
           VITE_BASE: "/${{ github.event.repository.name }}/"
           # 可在仓库 Settings → Variables 覆盖中转地址；不设置则用默认 EdgeOne 中转
           VITE_RELAY_URL: "${{ vars.VITE_RELAY_URL || 'https://relay.yousaling.dpdns.org' }}"
+          APP_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_ID: ${{ steps.version.outputs.build_id }}
         run: npm run build
 
       - name: Prepare Pages artifact
@@ -58,15 +73,29 @@ jobs:
           touch dist/.nojekyll
           cp dist/index.html dist/404.html
 
+      - name: Package release zip
+        working-directory: sanlu-pwa
+        run: |
+          cd dist
+          zip -qr "../dualcast-pwa-${{ steps.version.outputs.version }}.zip" .
+
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
-      - name: Upload artifact
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: sanlu-pwa/dist
 
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pwa-release
+          path: sanlu-pwa/dualcast-pwa-*.zip
+          retention-days: 7
+
   deploy:
+    if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -76,3 +105,48 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
+
+  release:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: pwa-release
+          path: release
+
+      - name: Generate release notes
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          bash .github/scripts/release-notes.sh \
+            "v${{ needs.build.outputs.version }}" release-notes.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ needs.build.outputs.version }}
+        run: |
+          zip_file="$(find release -maxdepth 1 -name '*.zip' -print -quit)"
+          if [ -z "$zip_file" ]; then
+            echo "缺少构建包，发布中止"
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$TAG" --notes-file release-notes.md --latest
+            gh release upload "$TAG" "$zip_file" --clobber
+          else
+            gh release create "$TAG" "$zip_file" \
+              --title "$TAG" \
+              --notes-file release-notes.md \
+              --target "$GITHUB_SHA" \
+              --latest
+          fi

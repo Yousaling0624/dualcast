@@ -16,6 +16,7 @@ import {
 } from '../lib/store'
 import type { Combo, SlotState } from '../lib/store'
 import type { FollowedLiveRoom } from '../lib/followed'
+import { APP_VERSION } from '../lib/version'
 import { formatCount } from '../lib/bili'
 import { netStatus } from '../lib/net'
 import SettingsDrawer from './SettingsDrawer.vue'
@@ -148,7 +149,7 @@ onBeforeUnmount(() => {
         <div class="brand-text">
           <div class="brand-line">
             <h1>叠播</h1>
-            <span class="ver">v1.12.0</span>
+            <span class="ver">v{{ APP_VERSION }}</span>
           </div>
           <p>DualCast · 两个直播间一起看</p>
         </div>

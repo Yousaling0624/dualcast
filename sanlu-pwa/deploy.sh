@@ -23,7 +23,7 @@ API="https://api.cloudflare.com/client/v4"
 AUTH=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" -H "Content-Type: application/json")
 
 echo "==> [1/5] 构建"
-npx vite build
+npm run build
 
 echo "==> [2/5] 查询 Account ID"
 ACCOUNT_ID=$(curl -s "${AUTH[@]}" "$API/accounts" | python3 -c "

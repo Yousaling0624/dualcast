@@ -27,7 +27,14 @@
 
 ## 部署（GitHub Pages + Cloudflare Pages）
 
-推送到 `main` 后，[`.github/workflows/deploy-pages.yml`](./.github/workflows/deploy-pages.yml) 会自动构建 `sanlu-pwa/` 并发布到 GitHub Pages。首次使用时在仓库 **Settings → Pages → Build and deployment** 选择 **GitHub Actions** 即可。
+推送到 `main` 后，[`.github/workflows/deploy-pages.yml`](./.github/workflows/deploy-pages.yml) 会自动完成整条发布链路：
+
+1. typecheck / 单元测试 / 构建；
+2. 部署到 **https://yousaling0624.github.io/dualcast/**；
+3. 自动打 tag `v0.1.<run_number>` 并创建 GitHub Release，Release notes 从 commit 标题和正文自动生成，附 `dualcast-pwa-*.zip` 构建包；
+4. 每次构建都会改写 Service Worker 缓存名（`__BUILD_ID__` → 版本-commit），已安装的 PWA 下次打开即可拿到新版本。
+
+版本号不再手动维护：`package.json` 固定 `0.1.0` 基线，CI 用运行序号生成 `v0.1.N`。首次使用时在仓库 **Settings → Pages → Build and deployment** 选择 **GitHub Actions** 即可。
 
 构建时自动使用：
 

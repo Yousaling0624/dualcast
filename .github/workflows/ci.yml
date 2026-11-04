@@ -1,15 +1,13 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'sanlu-pwa/**'
-      - '.github/workflows/ci.yml'
+  # push main 的构建 / 测试由 deploy-pages.yml 统一负责，这里只做 PR 检查
   pull_request:
     paths:
       - 'sanlu-pwa/**'
       - '.github/workflows/ci.yml'
+      - '.github/workflows/deploy-pages.yml'
+      - '.github/scripts/**'
   workflow_dispatch:
 
 permissions:

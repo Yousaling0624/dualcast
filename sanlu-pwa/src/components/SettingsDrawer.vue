@@ -33,6 +33,7 @@ import {
   probeRelay,
   setRelayBase,
 } from '../lib/net'
+import { APP_VERSION } from '../lib/version'
 import AppIcon from './AppIcon.vue'
 import FollowPicker from './FollowPicker.vue'
 
@@ -1129,7 +1130,7 @@ defineOptions({ name: 'SettingsDrawer' })
                 <div class="about-logo">叠</div>
                 <div>
                   <h3>叠播 DualCast</h3>
-                  <p>v1.12.0 · PWA 网页版</p>
+                  <p>v{{ APP_VERSION }} · PWA 网页版</p>
                 </div>
               </div>
               <p class="dim">

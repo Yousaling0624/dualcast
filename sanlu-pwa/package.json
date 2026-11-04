@@ -1,16 +1,16 @@
 {
   "name": "sanlu-dualcast",
   "private": true,
-  "version": "1.12.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/stamp-build.mjs",
     "typecheck": "vue-tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
     "preview": "vite preview",
-    "deploy": "vite build && wrangler pages deploy dist --project-name sanlu"
+    "deploy": "npm run build && wrangler pages deploy dist --project-name sanlu"
   },
   "dependencies": {
     "brotli-wasm": "^3.0.1",
